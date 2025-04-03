@@ -16,7 +16,7 @@ user_roles = {}  # user_id: персонаж
 user_history = {}  # user_id: {"history": [...], "last_input": "...", "last_bot_id": int}
 
 
-BOT_TOKEN = "8171517634:AAEgsU3cQA4kbjqicG2Lp0SKsoq0oeAXiYg"
+BOT_TOKEN = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROLES_FILE = os.path.join(BASE_DIR, "user_roles.json")
