@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime
 import asyncio
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, ForceReply
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes, CommandHandler, CallbackQueryHandler
 from telegram.helpers import escape_markdown
 import requests
@@ -12,7 +12,9 @@ import tiktoken
 DEBUG_MODE = True  # Включить отладку, если True
 
 user_roles = {}  # user_id: персонаж
-user_history = {}  # user_id: [сообщения]
+# user_history = {}  # user_id: [сообщения]
+user_history = {}  # user_id: {"history": [...], "last_input": "...", "last_bot_id": int}
+
 
 BOT_TOKEN = "8171517634:AAEgsU3cQA4kbjqicG2Lp0SKsoq0oeAXiYg"
 
@@ -176,6 +178,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /start — начать общение с ботом\n"
         "• /help — показать это сообщение\n"
         "• /reset — сбросить историю и роль\n"
+        "• /retry — повторить последнее сообщение\n"
+        "• /edit — отредактировать последнее сообщение\n"
         "• /role — выбрать персонажа для ролевого общения\n\n"
         "📌 Просто выбери роль, а затем пиши любое сообщение — я буду отвечать в её стиле!\n\n"
         "*Доступные роли:*\n"
@@ -210,6 +214,61 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔁 Всё сброшено! Можешь выбрать нового персонажа с помощью /role.")
 
 
+async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    user_data = user_history.get(user_id)
+
+    if not user_data or "last_input" not in user_data:
+        await update.message.reply_text("❗ Нет предыдущего сообщения для повтора.")
+        return
+
+    history = user_data.get("history", [])
+
+    # Удалим последнее сообщение пользователя и ответ ассистента
+    if len(history) >= 2:
+        last_msg = history[-2]
+        last_reply = history[-1]
+        char_name = characters[user_roles.get(user_id, next(iter(characters)))]['name']
+
+        if last_msg.startswith("Пользователь:") and last_reply.startswith(f"{char_name}:"):
+            history = history[:-2]  # удаляем последние два
+            user_data["history"] = history
+            user_history[user_id] = user_data
+            save_history()
+
+    await update.message.reply_text("🔁 Перегенерирую последний ответ...")
+    await handle_message(update, context, override_input=user_data["last_input"])
+
+
+
+# Функция для обработки команды /edit
+async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    user_data = user_history.get(user_id)
+
+    if not user_data or "last_input" not in user_data:
+        await update.message.reply_text("❗ Нет сообщения для редактирования.")
+        return
+
+    history = user_data.get("history", [])
+
+    # Удаляем последнее сообщение пользователя и ответ ассистента
+    if len(history) >= 2:
+        last_msg = history[-2]
+        last_reply = history[-1]
+        char_name = characters[user_roles.get(user_id, next(iter(characters)))]['name']
+
+        if last_msg.startswith("Пользователь:") and last_reply.startswith(f"{char_name}:"):
+            history = history[:-2]  # удаляем последние два сообщения
+            user_data["history"] = history
+            user_history[user_id] = user_data
+            save_history()
+
+    await update.message.reply_text(
+        f"📝 Отредактируй своё последнее сообщение:\n\n{user_data['last_input']}",
+        reply_markup=ForceReply(selective=True)
+    )
+
 
 # Функция для обработки нажатия кнопки выбора роли
 async def role_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -229,9 +288,21 @@ async def role_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+
+# Функция для обработки нажатия кнопки "Редактировать"
+async def handle_force_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.reply_to_message and "Отредактируй своё последнее сообщение" in update.message.reply_to_message.text:
+        # подменяем текст на новый и переотправляем
+        update.message.text = update.message.text
+        await handle_message(update, context)
+
+
+
+
 # Функция для обработки текстовых сообщений
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, override_input=None):
+    user_input = override_input or update.message.text
+
     user_obj = update.effective_user
     user_id = str(user_obj.id)
     username = user_obj.username or ""
@@ -249,7 +320,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     base_prompt = f"{char['prompt']}\n"
     tokens_used = len(enc.encode(base_prompt))
 
-    history = user_history.get(user_id, [])
+    # history = user_history.get(user_id, [])
+    # Получаем историю и данные пользователя
+
+    user_data = user_history.get(user_id)
+
+    # Если данных нет — создаём новую структуру
+    if user_data is None:
+        user_data = {
+            "history": [],
+            "last_input": "",
+            "last_bot_id": None
+        }
+
+    history = user_data.get("history", [])
+
+
     trimmed_history = []
 
      # обрезка истории по токенам
@@ -270,7 +356,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         trimmed_history = [user_message]
 
-    user_history[user_id] = trimmed_history
+    #user_history[user_id] = trimmed_history
+    # Сохраняем обновлённую историю и последнее сообщение
+    user_data["history"] = trimmed_history
+    user_data["last_input"] = user_input  # сохраняем последний ввод
+    user_history[user_id] = user_data
+
     save_history()
 
     history_text = "\n".join(trimmed_history)
@@ -300,7 +391,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # сохраняем в историю и лог
         trimmed_history.append(f"{char['name']}: {reply}")
-        user_history[user_id] = trimmed_history
         save_history()
 
         append_to_archive_user(user_id, role, "assistant", reply, username, full_name)
@@ -323,8 +413,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # await update.message.reply_text(html_reply, parse_mode="HTML")
 
     formatted_reply = safe_markdown_v2(reply)
-    await update.message.reply_text(formatted_reply, parse_mode="MarkdownV2")
-
+    # await update.message.reply_text(formatted_reply, parse_mode="MarkdownV2")
+    bot_msg = await update.message.reply_text(formatted_reply, parse_mode="MarkdownV2")
+    user_data["last_bot_id"] = bot_msg.message_id
 
     
 
@@ -343,14 +434,19 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("role", set_role))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CommandHandler("reset", reset_command))
+    app.add_handler(CommandHandler("retry", retry_command))
+    app.add_handler(CommandHandler("edit", edit_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, handle_force_reply))
     app.add_handler(CallbackQueryHandler(role_button))
 
     await app.bot.set_my_commands([
         BotCommand("role", "Выбрать персонажа"),
         BotCommand("start", "Начать диалог"),
         BotCommand("help", "Помощь по командам"),
+        BotCommand("retry", "Повторить сообщение"),
+        BotCommand("edit", "Редактировать сообщение"),
         BotCommand("reset", "Сбросить историю и роль")
     ])
 
