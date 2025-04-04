@@ -8,6 +8,6 @@
   "debug_mode": true,
   "tiktoken_encoding": "gpt2",
   "Telegram_bot_token": "8171517634:AAEgsU3cQA4kbjqicG2Lp0SKsoq0oeAXiYg",
-  "scenario_file": "neko_school.json",
+  "scenario_file": "miyazaki_world.json",
   "ollama_timeout": 240
 }

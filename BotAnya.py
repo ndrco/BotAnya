@@ -63,24 +63,25 @@ class BotState:
             self.user_roles[str(user_id)]["role"] = None
 
     # === ИСТОРИЯ ===
-    def get_user_history(self, user_id):
-        return self.user_history.setdefault(str(user_id), {
+    def get_user_history(self, user_id, scenario_file):
+        return self.user_history.setdefault(str(user_id), {}).setdefault(scenario_file, {
             "history": [],
             "last_input": "",
             "last_bot_id": None
         })
 
-    def update_user_history(self, user_id, history, last_input="", last_bot_id=None):
-        data = self.get_user_history(user_id)
+    def update_user_history(self, user_id, scenario_file, history, last_input="", last_bot_id=None):
+        data = self.get_user_history(user_id, scenario_file)
         data["history"] = history
         if last_input:
             data["last_input"] = last_input
         if last_bot_id is not None:
             data["last_bot_id"] = last_bot_id
-        self.user_history[str(user_id)] = data
+        self.user_history[str(user_id)][scenario_file] = data
 
-    def cut_last_exchange(self, user_id):
-        data = self.get_user_history(user_id)
+
+    def cut_last_exchange(self, user_id, scenario_file):
+        data = self.get_user_history(user_id, scenario_file)
         if len(data["history"]) >= 2:
             data["history"] = data["history"][:-2]
             return True
@@ -94,8 +95,8 @@ class BotState:
         return self.user_world_info.get(str(user_id), {})
     
     # === ВАЛИДАЦИЯ ПОСЛЕДНЕЙ ПАРЫ ===
-    def is_valid_last_exchange(self, user_id, char_name, world):
-        data = self.get_user_history(user_id)
+    def is_valid_last_exchange(self, user_id, scenario_file, char_name, world):
+        data = self.get_user_history(user_id, scenario_file)
         history = data.get("history", [])
         if len(history) < 2:
             return False
@@ -448,22 +449,23 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Функция для обработки команды /edit
 async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    user_data = bot_state.get_user_history(user_id)
+    
+    char, world, _, scenario_file, error = get_user_character_and_world(user_id)
+    if error:
+        await update.message.reply_text(error, parse_mode="Markdown")
+        return
+
+    user_data = bot_state.get_user_history(user_id, scenario_file)
 
     if not user_data or "last_input" not in user_data:
         await update.message.reply_text("❗ Нет сообщения для редактирования.")
         return
 
-    char, world, _, _, error = get_user_character_and_world(user_id)
-    if error:
-        await update.message.reply_text(error, parse_mode="Markdown")
-        return
-
     char_name = char["name"]
 
-    if bot_state.is_valid_last_exchange(user_id, char_name, world):
+    if bot_state.is_valid_last_exchange(user_id, scenario_file, char_name, world):
         history_cut = user_data["history"][:-2]
-        bot_state.update_user_history(user_id, history_cut, last_input=user_data["last_input"])
+        bot_state.update_user_history(user_id, scenario_file, history_cut, last_input=user_data["last_input"])
         save_history()
         if bot_state.debug_mode:
             print(f"✂️ История пользователя {user_id} обрезана на 2 сообщения (edit)")
@@ -484,22 +486,23 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Функция для обработки команды /retry
 async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    user_data = bot_state.get_user_history(user_id)
+
+    char, world, _, scenario_file, error = get_user_character_and_world(user_id)
+    if error:
+        await update.message.reply_text(error, parse_mode="Markdown")
+        return
+
+    user_data = bot_state.get_user_history(user_id, scenario_file)
 
     if not user_data or "last_input" not in user_data:
         await update.message.reply_text("❗ Нет предыдущего сообщения для повтора.")
         return
 
-    char, world, _, _, error = get_user_character_and_world(user_id)
-    if error:
-        await update.message.reply_text(error, parse_mode="Markdown")
-        return
-
     char_name = char["name"]
 
-    if bot_state.is_valid_last_exchange(user_id, char_name, world):
+    if bot_state.is_valid_last_exchange(user_id, scenario_file, char_name, world):
         history_cut = user_data["history"][:-2]
-        bot_state.update_user_history(user_id, history_cut, last_input=user_data["last_input"])
+        bot_state.update_user_history(user_id, scenario_file, history_cut, last_input=user_data["last_input"])
         save_history()
         if bot_state.debug_mode:
             print(f"🔁 История пользователя {user_id} обрезана на 2 сообщения (retry)")
@@ -607,14 +610,18 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         characters, world = load_characters(scenario_path)
         bot_state.set_world_info(user_id, world)
 
-        # 🧹 Очистка истории
-        bot_state.update_user_history(user_id, [], last_input="", last_bot_id=None)
-        if bot_state.debug_mode:
-            print(f"🧹 Очищена история пользователя {user_id} при смене сценария.")
+        # 🧹 Создаём историю, только если её ещё нет
+        user_histories = bot_state.user_history.setdefault(user_id, {})
+        if selected_file not in user_histories:
+            user_histories[selected_file] = {
+                "history": [],
+                "last_input": "",
+                "last_bot_id": None
+            }
 
-        # ❌ Удаляем роль пользователя
+        # ❌ Удаляем текущую роль, но сохраняем выбор сценария
         bot_state.clear_user_role(user_id)
-        bot_state.set_user_role(user_id, None, selected_file)  # сохраняем только сценарий
+        bot_state.set_user_role(user_id, None, selected_file)
 
         save_roles()
         save_history()
@@ -708,7 +715,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     tokens_used = len(bot_state.enc.encode(base_prompt))
 
     # Получаем историю
-    user_data = bot_state.get_user_history(user_id)
+    user_data = bot_state.get_user_history(user_id, scenario_file)
     history = user_data["history"]
     trimmed_history = []
 
@@ -731,7 +738,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     else:
         trimmed_history = [user_message]
 
-    bot_state.update_user_history(user_id, trimmed_history, last_input=user_input)
+    bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_input=user_input)
     save_history()
 
     if bot_state.ChatML:
@@ -812,7 +819,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     formatted_reply = safe_markdown_v2(reply)
     bot_msg = await update.message.reply_text(formatted_reply, parse_mode="MarkdownV2")
-    bot_state.update_user_history(user_id, trimmed_history, last_bot_id=bot_msg.message_id)
+    bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_bot_id=bot_msg.message_id)
 
 
 
