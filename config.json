@@ -1,0 +1,9 @@
+{
+  "ollama_url": "http://localhost:11434/api/generate",
+  "model": "saiga_nemo_12b.Q8_0:latest",
+  "max_tokens": 7000,
+  "debug_mode": true,
+  "scenario_file": "c:\\Users\\cooka\\Documents\\Python lessions\\BotAnya\\scenarios\\neko_school.json",
+  "tiktoken_encoding": "gpt2",
+  "Telegram_bot_token": "8171517634:AAEgsU3cQA4kbjqicG2Lp0SKsoq0oeAXiYg"
+}
