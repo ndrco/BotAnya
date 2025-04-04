@@ -34,13 +34,18 @@ class BotState:
         self.ollama_url = ""
         self.debug_mode = True
         self.bot_token = ""
+        self.timeout = 90
+        self.ChatML = False
+        self.temperature = 1.0
+        self.top_p = 0.95
 
     def __str__(self):
         return (
             f"BotState(model={self.model}, url={self.ollama_url}, "
             f"max_tokens={self.max_tokens}, debug={self.debug_mode} ,"
             f"roles={len(self.user_roles)}, history={len(self.user_history)}, "
-            f"bot_token={self.bot_token}, enc={self.enc})"
+            f"bot_token={self.bot_token}, enc={self.enc}), "
+            f"timeout={self.timeout}, ChatML={self.ChatML}"
         )
     
     # === РОЛИ ===
@@ -118,6 +123,10 @@ def init_config():
     bot_state.ollama_url = config.get("ollama_url", "http://localhost:11434/api/generate")
     bot_state.debug_mode = config.get("debug_mode", True)
     bot_state.bot_token = config.get("Telegram_bot_token", "")
+    bot_state.timeout = config.get("ollama_timeout", 90)
+    bot_state.ChatML = config.get("ChatML", False)
+    bot_state.temperature = config.get("temperature", 1.0)
+    bot_state.top_p = config.get("top_p", 0.95)
 
     try:
         bot_state.enc = tiktoken.get_encoding(config.get("tiktoken_encoding", "gpt2"))
@@ -330,7 +339,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scenario_file = role_entry["scenario"]
         scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
         try:
-            characters, _ = load_characters(scenario_path, debug=bot_state.debug_mode)
+            characters, _ = load_characters(scenario_path)
             role_lines = [
                 f"• *{char['name']}* — {char['description']} {char['emoji']}"
                 for char in characters.values()
@@ -401,7 +410,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_history()
 
     await update.message.reply_text(
-        "🔁 Всё сброшено! Можешь выбрать нового персонажа с помощью /scenario и /role  🧹"
+        "🔁 Всё сброшено! Можешь выбрать нового персонажа с помощью /scenario и /role 🧹"
     )
 
 
@@ -642,6 +651,24 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+# Функция для сборки ChatML-промпта
+# (для Ollama и других моделей, поддерживающих ChatML)
+def build_chatml_prompt(system_prompt, history, user_emoji, char_name):
+    blocks = [f"<|im_start|>system\n{system_prompt}<|im_end|>"]
+    for msg in history:
+        if msg.startswith(f"{user_emoji}:"):
+            text = msg[len(user_emoji)+1:].strip()
+            blocks.append(f"<|im_start|>user\n{text}<|im_end|>")
+        elif msg.startswith(f"{char_name}:"):
+            text = msg[len(char_name)+1:].strip()
+            blocks.append(f"<|im_start|>assistant\n{text}<|im_end|>")
+    # Добавим пустой блок, чтобы модель начала говорить
+    blocks.append(f"<|im_start|>assistant\n")
+    return "\n".join(blocks)
+
+
+
+
 
 # Функция для обработки текстовых сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, override_input=None):
@@ -678,7 +705,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     user_role_description = world.get("user_role", "")
     world_prompt = world.get("system_prompt", "")
     base_prompt = f"{world_prompt}\nПользователь — {user_role_description}.\n{char['prompt']}\n"
-
     tokens_used = len(bot_state.enc.encode(base_prompt))
 
     # Получаем историю
@@ -708,14 +734,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     bot_state.update_user_history(user_id, trimmed_history, last_input=user_input)
     save_history()
 
-    history_text = "\n".join(trimmed_history)
-    prompt = f"{base_prompt}{history_text}\n{char['name']}:"
+    if bot_state.ChatML:
+        # Используем ChatML-промпт
+        system_text = (
+            f"{world_prompt.strip()}\n"
+            f"Пользователь — {user_role_description.strip()}.\n"
+            f"{char['prompt'].strip()}"
+        )
+        prompt = build_chatml_prompt(system_text, trimmed_history, user_emoji, char["name"])
+        payload = {
+            "model": bot_state.model,
+            "prompt": prompt,
+            "stream": False,
+            "temperature": bot_state.temperature,
+            "top_p": bot_state.top_p,
+        }
 
-    payload = {
-        "model": bot_state.model,
-        "prompt": prompt,
-        "stream": False
-    }
+    else:
+        # Используем обычный промпт
+        history_text = "\n".join(trimmed_history)
+        prompt = f"{base_prompt}{history_text}\n{char['name']}:"
+        payload = {
+            "model": bot_state.model,
+            "prompt": prompt,
+            "stream": False
+        }
 
     if bot_state.debug_mode:
         print("\n" + "="*60)
@@ -726,9 +769,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         print("="*60)
 
+    thinking_message = None
+
     try:
         thinking_message = await update.message.reply_text(f"{char['name']} думает... 🤔")
-        response = requests.post(bot_state.ollama_url, json=payload, timeout=30)
+        response = requests.post(bot_state.ollama_url, json=payload, timeout=bot_state.timeout)
         data = response.json()
         reply = data["response"]
 
@@ -755,7 +800,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     except Exception as e:
         reply = f"Ошибка запроса к модели: {e}"
 
-    await thinking_message.delete()
+    finally:
+        if thinking_message:
+            try:
+                await thinking_message.delete()
+            except Exception as e:
+                if bot_state.debug_mode:
+                    print(f"⚠️ Не удалось удалить сообщение: {e}")
+
+
 
     formatted_reply = safe_markdown_v2(reply)
     bot_msg = await update.message.reply_text(formatted_reply, parse_mode="MarkdownV2")
