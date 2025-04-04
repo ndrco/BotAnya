@@ -9,11 +9,6 @@ import requests
 import re
 import tiktoken
 
-DEBUG_MODE = True  # Включить отладку, если True
-
-user_roles = {}  # user_id: персонаж
-# user_history = {}  # user_id: [сообщения]
-user_history = {}  # user_id: {"history": [...], "last_input": "...", "last_bot_id": int}
 
 # Путь к файлам и директориям
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,6 +19,109 @@ HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
 LOG_DIR = os.path.join(BASE_DIR, "chat_logs")
 
 
+
+
+class BotState:
+    def __init__(self):
+
+        self.user_roles = {}
+        self.user_history = {}
+        self.user_world_info = {}
+        self.config = {}
+        self.max_tokens = 7000
+        self.enc = None
+        self.model = ""
+        self.ollama_url = ""
+        self.debug_mode = True
+        self.bot_token = ""
+
+    # === РОЛИ ===
+    def get_user_role(self, user_id):
+        return self.user_roles.get(str(user_id))
+
+    def set_user_role(self, user_id, role, scenario_file):
+        self.user_roles[str(user_id)] = {
+            "role": role,
+            "scenario": scenario_file
+        }
+
+    def clear_user_role(self, user_id):
+        if str(user_id) in self.user_roles:
+            self.user_roles[str(user_id)]["role"] = None
+
+    # === ИСТОРИЯ ===
+    def get_user_history(self, user_id):
+        return self.user_history.setdefault(str(user_id), {
+            "history": [],
+            "last_input": "",
+            "last_bot_id": None
+        })
+
+    def update_user_history(self, user_id, history, last_input="", last_bot_id=None):
+        data = self.get_user_history(user_id)
+        data["history"] = history
+        if last_input:
+            data["last_input"] = last_input
+        if last_bot_id is not None:
+            data["last_bot_id"] = last_bot_id
+        self.user_history[str(user_id)] = data
+
+    def cut_last_exchange(self, user_id):
+        data = self.get_user_history(user_id)
+        if len(data["history"]) >= 2:
+            data["history"] = data["history"][:-2]
+            return True
+        return False
+
+    # === WORLD_INFO ===
+    def set_world_info(self, user_id, world_data):
+        self.user_world_info[str(user_id)] = world_data
+
+    def get_world_info(self, user_id):
+        return self.user_world_info.get(str(user_id), {})
+    
+    # === ВАЛИДАЦИЯ ПОСЛЕДНЕЙ ПАРЫ ===
+    def is_valid_last_exchange(self, user_id, char_name, world):
+        data = self.get_user_history(user_id)
+        history = data.get("history", [])
+        if len(history) < 2:
+            return False
+
+        last_msg = history[-2]
+        last_reply = history[-1]
+
+        user_prefix = f"{world.get('user_emoji', '👤')}:"
+        assistant_prefix = f"{char_name}:"
+
+        return last_msg.startswith(user_prefix) and last_reply.startswith(assistant_prefix)
+
+
+bot_state = BotState()
+
+
+
+# Инициализация конфигурации
+def init_config():
+    config = load_config()
+
+    bot_state.config = config
+    bot_state.max_tokens = config.get("max_tokens", 7000)
+    bot_state.model = config.get("model", "saiga_nemo_12b.Q8_0:latest")
+    bot_state.ollama_url = config.get("ollama_url", "http://localhost:11434/api/generate")
+    bot_state.debug_mode = config.get("debug_mode", True)
+    bot_state.bot_token = config.get("Telegram_bot_token", "")
+
+    try:
+        bot_state.enc = tiktoken.get_encoding(config.get("tiktoken_encoding", "gpt2"))
+    except Exception:
+        print("⚠️ Не удалось найти энкодер, использую gpt2 по умолчанию.")
+        bot_state.enc = tiktoken.get_encoding("gpt2")
+
+
+
+
+
+# Загрузка конфигурации из файла config.json
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -35,26 +133,8 @@ def load_config():
     raise FileNotFoundError("Файл config.json не найден!")
 
 
-config = load_config()
 
-# Настройки из config
-BOT_TOKEN = config.get("Telegram_bot_token", "")
-if not BOT_TOKEN:
-    raise ValueError("Не указан токен бота в config.json!")
-OLLAMA_URL = config.get("ollama_url", "http://localhost:11434/api/generate")
-MODEL = config.get("model", "saiga_nemo_12b.Q8_0:latest")
-MAX_TOKENS = config.get("max_tokens", 7000)
-DEBUG_MODE = config.get("debug_mode", True)
-SCENARIO_FILE = os.path.join(SCENARIOS_DIR, config.get("scenario_file", "fantasy.json"))
-ENCODING_NAME = config.get("tiktoken_encoding", "gpt2")
-try:
-    enc = tiktoken.get_encoding(ENCODING_NAME)
-except Exception:
-    print(f"⚠️ Не удалось найти энкодер '{ENCODING_NAME}', использую 'gpt2' по умолчанию.")
-    enc = tiktoken.get_encoding("gpt2")
-
-
-# Загрузка персонажей из указанного сценария
+# Загрузка сценария по умолчанию
 def load_characters(scenario_path: str):
     if os.path.exists(scenario_path):
         with open(scenario_path, "r", encoding="utf-8") as f:
@@ -63,7 +143,7 @@ def load_characters(scenario_path: str):
             world = data.get("world", {"name": "Неизвестный мир", "description": ""})
             characters = data.get("characters", {})
 
-            if DEBUG_MODE:
+            if bot_state.debug_mode:
                 print(f"🌍 Мир: {world['name']} — {world['description']}")
                 print("🎭 Персонажи:")
                 for key, char in characters.items():
@@ -75,44 +155,37 @@ def load_characters(scenario_path: str):
 
 
 
-characters, world = load_characters(SCENARIO_FILE)
-global world_info
-world_info = world
-
-
-
-
-
-
 
 # Загрузка ролей из файла, если он существует
 def load_roles():
     if os.path.exists(ROLES_FILE):
         with open(ROLES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+            bot_state.user_roles = json.load(f)
+    else:
+        bot_state.user_roles = {}         
 
 
 
 # Сохранение ролей в файл
 def save_roles():
     with open(ROLES_FILE, "w", encoding="utf-8") as f:
-        json.dump(user_roles, f, ensure_ascii=False, indent=2)
+        json.dump(bot_state.user_roles, f, ensure_ascii=False, indent=2)
 
 
 
-# Загрузка истории сообщений из файла, если он существует
+## Загрузка истории из файла, если он существует
 def load_history():
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+            bot_state.user_history = json.load(f)
+    else:
+        bot_state.user_history = {}
 
 
-# Сохранение истории сообщений в файл
+# Сохранение истории в файл
 def save_history():
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(user_history, f, ensure_ascii=False, indent=2)
+        json.dump(bot_state.user_history, f, ensure_ascii=False, indent=2)
 
 
 
@@ -146,23 +219,10 @@ def append_to_archive_user(
         "world": world_name
     }
 
-
     with open(file_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
 
-# Функция для обработки Markdown
-def markdown_to_html(text):
-    """
-    Преобразует текст с Markdown-разметкой:
-      - **текст** → <b>текст</b> (жирный)
-      - *текст* → <i>текст</i> (курсив)
-    """
-    # Сначала обрабатываем двойные звездочки (жирный), используя не жадный квантификатор
-    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    # Затем обрабатываем одинарные звездочки (курсив)
-    text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
-    return text
 
 
 # Функция для экранирования Markdown-разметки
@@ -182,49 +242,64 @@ def safe_markdown_v2(text: str) -> str:
 
 
 
-# Функция для обработки команды /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    role_entry = user_roles.get(user_id)
+# Функция для получения персонажа и мира пользователя
+def get_user_character_and_world(user_id: str):
+    """
+    Возвращает: (char, world, characters, scenario_file) или (None, None, None, None) + сообщение об ошибке
+    """
+    role_entry = bot_state.get_user_role(user_id)
 
     if not role_entry or not isinstance(role_entry, dict):
-        await update.message.reply_text(
-            "Приветик! 🐾 Я — ролевой бот, который может говорить от имени разных персонажей.\n\n"
-            "Сначала выбери, с кем ты хочешь общаться: /role\n"
-            "А потом просто пиши — и начнём магическое общение! ✨"
-        )
-        return
+        return None, None, None, None, "😿 Ты ещё не выбрал персонажа. Напиши /role."
 
     role_key = role_entry.get("role")
     scenario_file = role_entry.get("scenario")
 
     if not role_key or not scenario_file:
-        await update.message.reply_text(
-            "Приветик! 🐾 Ты ещё не выбрал персонажа полностью.\n"
-            "Напиши /role, чтобы выбрать роль, и /scenario — если хочешь сменить мир 🌍"
-        )
-        return
+        return None, None, None, None, "😿 Не хватает информации о персонаже или сценарии. Напиши /role."
 
-    # Загружаем нужный мир
     scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
+    if not os.path.exists(scenario_path):
+        return None, None, None, None, f"❗ Сценарий *{scenario_file}* не найден."
+
     try:
         characters, world = load_characters(scenario_path)
     except Exception as e:
-        await update.message.reply_text(
-            f"❗ Не удалось загрузить сценарий *{scenario_file}*: {e}",
-            parse_mode="Markdown"
-        )
-        return
+        return None, None, None, None, f"❗ Ошибка загрузки сценария: {e}"
 
     char = characters.get(role_key)
     if not char:
-        await update.message.reply_text(
-            f"Приветик! 🌸 Ты выбрал персонажа *{role_key}*, но его больше нет в сценарии *{world.get('name', scenario_file)}*.\n"
-            "Пожалуйста, выбери нового через /role 🐾",
-            parse_mode="Markdown"
+        return None, None, None, None, (
+            f"⚠️ Персонаж *{role_key}* не найден в сценарии *{world.get('name', scenario_file)}*.\n"
+            f"Пожалуйста, выбери нового: /role"
         )
-        return
 
+    return char, world, characters, scenario_file, None
+
+
+
+
+
+
+# Функция для обработки команды /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
+    user_id = str(update.effective_user.id)
+
+    char, _, _, _, error = get_user_character_and_world(user_id)
+    if error:
+        if "не выбрал персонажа" in error:
+            # 💬 приветствие для новичка
+            await update.message.reply_text(
+                "Приветик! 🐾 Я — ролевой бот, который может говорить от имени разных персонажей.\n\n"
+                "Сначала выбери сценарий: /scenario и с кем ты хочешь общаться: /role\n"
+                "А потом просто пиши — и начнём магическое общение! ✨"
+            )
+        else:
+            # ⚠️ Остальные ошибки — показываем как есть
+            await update.message.reply_text(error, parse_mode="Markdown")
+        return
+        
     # 💕 Всё хорошо — приветствуем как раньше!
     await update.message.reply_text(
         f"Привет! Ты уже выбрал персонажа: *{char['name']}* {char.get('emoji', '')}\n\n"
@@ -238,12 +313,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Функция для обработки команды /help
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    role_lines = []
-    for key, char in characters.items():
-        line = f"• *{char['name']}* — {char['description']} {char['emoji']}"
-        role_lines.append(line)
+    user_id = str(update.effective_user.id)
+    role_entry = bot_state.get_user_role(user_id)
 
-    roles_text = "\n".join(role_lines)
+    roles_text = "⚠️ Сначала выбери сценарий через /scenario."
+
+    if role_entry and "scenario" in role_entry:
+        scenario_file = role_entry["scenario"]
+        scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
+        try:
+            characters, _ = load_characters(scenario_path, debug=bot_state.debug_mode)
+            role_lines = [
+                f"• *{char['name']}* — {char['description']} {char['emoji']}"
+                for char in characters.values()
+            ]
+            roles_text = "\n".join(role_lines)
+        except Exception as e:
+            roles_text = f"⚠️ Ошибка загрузки персонажей: {e}"
 
     await update.message.reply_text(
         "🆘 *Помощь*\n\n"
@@ -263,8 +349,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+
 # Функция для обработки команды /role
 async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    role_entry = bot_state.get_user_role(user_id)
+
+    if not role_entry or "scenario" not in role_entry:
+        await update.message.reply_text("⚠️ Сначала выбери сценарий через /scenario.")
+        return
+
+    scenario_file = role_entry["scenario"]
+    scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
+
+    try:
+        characters, _ = load_characters(scenario_path)
+    except Exception as e:
+        await update.message.reply_text(f"❗ Ошибка загрузки сценария: {e}")
+        return
+
     keyboard = [
         [InlineKeyboardButton(characters[key]["name"], callback_data=key)]
         for key in characters
@@ -273,50 +377,35 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выбери персонажа:", reply_markup=reply_markup)
 
 
+
+
+
 # Функция для обработки команды /reset
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
 
-    # Удаляем историю и роль
-    if user_id in user_roles:
-        del user_roles[user_id]
-    if user_id in user_history:
-        del user_history[user_id]
+    # Удаляем роль и историю из bot_state
+    bot_state.user_roles.pop(user_id, None)
+    bot_state.user_history.pop(user_id, None)
+    bot_state.user_world_info.pop(user_id, None)
 
     save_roles()
     save_history()
 
-    await update.message.reply_text("🔁 Всё сброшено! Можешь выбрать нового персонажа с помощью /role.")
+    await update.message.reply_text(
+        "🔁 Всё сброшено! Можешь выбрать нового персонажа с помощью /scenario и /role  🧹"
+    )
 
 
 
 
+# Функция для обработки команды /whoami
 async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    role_entry = user_roles.get(user_id)
-
-    if not role_entry or not isinstance(role_entry, dict):
-        await update.message.reply_text("😿 Ты пока не выбрал персонажа.\nНапиши /scenario, чтобы выбрать мир, а потом /role для роли.")
-        return
-
-    scenario_file = role_entry.get("scenario")
-    role_key = role_entry.get("role")
-
-    if not scenario_file or not role_key:
-        await update.message.reply_text("⚠️ У тебя не выбрана роль или сценарий.\nПопробуй снова через /scenario и /role.")
-        return
-
-    scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
-
-    try:
-        characters, world = load_characters(scenario_path)
-    except Exception as e:
-        await update.message.reply_text(f"❗ Ошибка загрузки сценария '{scenario_file}': {e}")
-        return
-
-    char = characters.get(role_key)
-    if not char:
-        await update.message.reply_text("⚠️ Персонаж не найден в этом сценарии. Попробуй выбрать заново через /role.")
+    
+    char, world, _, scenario_file, error = get_user_character_and_world(user_id)
+    if error:
+        await update.message.reply_text(error, parse_mode="Markdown")
         return
 
     user_role_desc = world.get("user_role", "")
@@ -339,114 +428,27 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-# Функция для обработки команды /retry
-async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    user_data = user_history.get(user_id)
-
-    if not user_data or "last_input" not in user_data:
-        await update.message.reply_text("❗ Нет предыдущего сообщения для повтора.")
-        return
-
-    history_list = user_data.get("history", [])
-    if len(history_list) < 2:
-        await update.message.reply_text("❗ Недостаточно истории для повтора.")
-        return
-
-    # Загружаем роль и сценарий
-    role_entry = user_roles.get(user_id)
-    if not role_entry:
-        await update.message.reply_text("❗ У тебя не выбрана роль. Напиши /role.")
-        return
-
-    role_key = role_entry["role"]
-    scenario_file = role_entry["scenario"]
-    scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
-
-    try:
-        characters, world = load_characters(scenario_path)
-    except Exception as e:
-        await update.message.reply_text(f"❗ Не удалось загрузить сценарий: {e}")
-        return
-
-    char = characters.get(role_key)
-    if not char:
-        await update.message.reply_text("❗ Персонаж не найден в сценарии.")
-        return
-
-    char_name = char["name"]
-
-    # Проверка, что последние два сообщения — это пользователь и ассистент
-    last_msg = history_list[-2]
-    last_reply = history_list[-1]
-
-    user_prefix = f"{world.get('user_emoji', '👤')}:"
-    assistant_prefix = f"{char_name}:"
-
-    if last_msg.startswith(user_prefix) and last_reply.startswith(assistant_prefix):
-        user_data["history"] = history_list[:-2]
-        save_history()
-        if DEBUG_MODE:
-            print(f"🔁 История пользователя {user_id} обрезана на 2 сообщения (retry)")
-    else:
-        await update.message.reply_text("⚠️ Нельзя перегенерировать: последние сообщения не соответствуют шаблону.")
-        return
-
-    await update.message.reply_text("🔁 Перегенерирую последний ответ...")
-    await handle_message(update, context, override_input=user_data["last_input"])
-
-
-
-
-
 # Функция для обработки команды /edit
 async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    user_data = user_history.get(user_id)
+    user_data = bot_state.get_user_history(user_id)
 
     if not user_data or "last_input" not in user_data:
         await update.message.reply_text("❗ Нет сообщения для редактирования.")
         return
 
-    history_list = user_data.get("history", [])
-    if len(history_list) < 2:
-        await update.message.reply_text("❗ Недостаточно истории для редактирования.")
-        return
-
-    # Загружаем роль и мир пользователя
-    role_entry = user_roles.get(user_id)
-    if not role_entry:
-        await update.message.reply_text("❗ У тебя не выбрана роль. Напиши /role.")
-        return
-
-    role_key = role_entry["role"]
-    scenario_file = role_entry["scenario"]
-    scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
-
-    try:
-        characters, world = load_characters(scenario_path)
-    except Exception as e:
-        await update.message.reply_text(f"❗ Не удалось загрузить сценарий: {e}")
-        return
-
-    char = characters.get(role_key)
-    if not char:
-        await update.message.reply_text("❗ Персонаж не найден в сценарии.")
+    char, world, _, _, error = get_user_character_and_world(user_id)
+    if error:
+        await update.message.reply_text(error, parse_mode="Markdown")
         return
 
     char_name = char["name"]
 
-    # Проверка, что последние два сообщения — это пользователь и ассистент
-    last_msg = history_list[-2]
-    last_reply = history_list[-1]
-
-    user_prefix = f"{world.get('user_emoji', '👤')}:"
-    assistant_prefix = f"{char_name}:"
-
-    if last_msg.startswith(user_prefix) and last_reply.startswith(assistant_prefix):
-        user_data["history"] = history_list[:-2]
+    if bot_state.is_valid_last_exchange(user_id, char_name, world):
+        history_cut = user_data["history"][:-2]
+        bot_state.update_user_history(user_id, history_cut, last_input=user_data["last_input"])
         save_history()
-        if DEBUG_MODE:
+        if bot_state.debug_mode:
             print(f"✂️ История пользователя {user_id} обрезана на 2 сообщения (edit)")
     else:
         await update.message.reply_text("⚠️ Нельзя отредактировать последнее сообщение: структура не совпадает.")
@@ -459,34 +461,39 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-# Функция для обработки нажатия кнопки выбора роли
-async def role_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query: CallbackQuery = update.callback_query
-    await query.answer()
 
-    user_id = query.from_user.id
-    role_key = query.data
 
-    if role_key in characters:
-        user_roles[str(user_id)] = {
-            "role": role_key,
-            "scenario": os.path.basename(config["scenario_file"])  # или selected_file, если есть
-}
-        save_roles()
-        await query.edit_message_text(f"Теперь ты общаешься с {characters[role_key]['name']} {characters[role_key]['emoji']}.\n\n"
-                                      "Просто напиши что-нибудь — и я отвечу тебе в её стиле!")
+
+# Функция для обработки команды /retry
+async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    user_data = bot_state.get_user_history(user_id)
+
+    if not user_data or "last_input" not in user_data:
+        await update.message.reply_text("❗ Нет предыдущего сообщения для повтора.")
+        return
+
+    char, world, _, _, error = get_user_character_and_world(user_id)
+    if error:
+        await update.message.reply_text(error, parse_mode="Markdown")
+        return
+
+    char_name = char["name"]
+
+    if bot_state.is_valid_last_exchange(user_id, char_name, world):
+        history_cut = user_data["history"][:-2]
+        bot_state.update_user_history(user_id, history_cut, last_input=user_data["last_input"])
+        save_history()
+        if bot_state.debug_mode:
+            print(f"🔁 История пользователя {user_id} обрезана на 2 сообщения (retry)")
     else:
-        await query.edit_message_text("Ошибка выбора роли.")
+        await update.message.reply_text("⚠️ Нельзя перегенерировать: последние сообщения не соответствуют шаблону.")
+        return
+
+    await update.message.reply_text("🔁 Перегенерирую последний ответ...")
+    await handle_message(update, context, override_input=user_data["last_input"])
 
 
-
-
-# Функция для обработки нажатия кнопки "Редактировать"
-async def handle_force_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message and "Отредактируй своё последнее сообщение" in update.message.reply_to_message.text:
-        # подменяем текст на новый и переотправляем
-        update.message.text = update.message.text
-        await handle_message(update, context)
 
 
 
@@ -519,39 +526,88 @@ async def scenario_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+
+
+# Функция для обработки нажатия кнопки выбора роли
+async def role_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query: CallbackQuery = update.callback_query
+    await query.answer()
+
+    user_id = str(query.from_user.id)
+    role_key = query.data
+
+    role_entry = bot_state.get_user_role(user_id)
+    if not role_entry or "scenario" not in role_entry:
+        await query.edit_message_text("⚠️ Сначала выбери сценарий через /scenario.")
+        return
+
+    scenario_file = role_entry["scenario"]
+    scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
+
+    try:
+        characters, world = load_characters(scenario_path)
+    except Exception as e:
+        await query.edit_message_text(f"❗ Ошибка загрузки сценария: {e}")
+        return
+
+    if role_key not in characters:
+        await query.edit_message_text("⚠️ Ошибка: выбранный персонаж не найден в текущем сценарии.")
+        return
+
+    bot_state.set_user_role(user_id, role_key, scenario_file)
+    save_roles()
+
+    char = characters[role_key]
+    await query.edit_message_text(
+        f"Теперь ты общаешься с {char['name']} {char.get('emoji', '')}.\n\n"
+        f"Просто напиши что-нибудь — и я отвечу тебе в её стиле! 🎭"
+    )
+
+
+
+
+# Функция для обработки нажатия кнопки "Редактировать"
+async def handle_force_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.reply_to_message and "Отредактируй своё последнее сообщение" in update.message.reply_to_message.text:
+        # подменяем текст на новый и переотправляем
+        update.message.text = update.message.text
+        await handle_message(update, context)
+
+
+
+
+
 # Функция для обработки нажатия кнопки выбора сценария
 async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query: CallbackQuery = update.callback_query
     await query.answer()
 
     selected_file = query.data.split(":", 1)[1].strip()
-    
     scenario_path = os.path.join(SCENARIOS_DIR, selected_file)
+    user_id = str(query.from_user.id)
 
     try:
-        global characters, config, world_info, user_history
-
         characters, world = load_characters(scenario_path)
-        world_info = world  # сохраняем для использования в prompt
+        bot_state.set_world_info(user_id, world)
 
-        # 🧹 Очистка истории при смене сценария
-        user_id_str = str(query.from_user.id)
+        # 🧹 Очистка истории
+        bot_state.update_user_history(user_id, [], last_input="", last_bot_id=None)
+        if bot_state.debug_mode:
+            print(f"🧹 Очищена история пользователя {user_id} при смене сценария.")
 
-        user_history[user_id_str] = {
-            "history": [],
-            "last_input": "",
-            "last_bot_message_id": None
-        }
+        # ❌ Удаляем роль пользователя
+        bot_state.clear_user_role(user_id)
+        bot_state.set_user_role(user_id, None, selected_file)  # сохраняем только сценарий
 
-        if DEBUG_MODE:
-            print(f"🧹 Очищена история пользователя {user_id_str} при смене сценария.")
-        
+        save_roles()
+        save_history()
+
         # Сохраняем выбранный сценарий в config.json
-        config["scenario_file"] = scenario_path
+        bot_state.config["scenario_file"] = selected_file  # сохраняем только имя файла
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+            json.dump(bot_state.config, f, ensure_ascii=False, indent=2)
 
-        # Подготовка списка ролей
+        # Список ролей
         role_lines = [
             f"• *{char['name']}* — {char['description']} {char['emoji']}"
             for key, char in characters.items()
@@ -571,12 +627,6 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-        # ❌ Удаляем выбранную роль пользователя
-        user_id_str = str(query.from_user.id)
-        if user_id_str in user_roles:
-            user_roles[user_id_str]["role"] = None
-            save_roles()  # обязательно!
-
     except Exception as e:
         await query.edit_message_text(f"⚠️ Ошибка при загрузке сценария: {e}")
 
@@ -594,61 +644,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     username = user_obj.username or ""
     full_name = user_obj.full_name or ""
 
-    # получаем роль пользователя или первую из characters по умолчанию
-    # Получаем роль и сценарий пользователя
-    role_entry = user_roles.get(user_id)
-
-    if not role_entry or not isinstance(role_entry, dict):
-        await update.message.reply_text("😿 Ты ещё не выбрал персонажа. Напиши /role.")
+    # Получаем персонажа и мир пользователя
+    char, world, characters, scenario_file, error = get_user_character_and_world(user_id)
+    if error:
+        await update.message.reply_text(error, parse_mode="Markdown")
         return
 
-    role_key = role_entry.get("role")
-    scenario_file = role_entry.get("scenario")
-
-    if not role_key or not scenario_file:
-        await update.message.reply_text("😿 Не хватает информации о твоём персонаже или сценарии. Напиши /role.")
-        return
-
-    # Загружаем мир
-    scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
-    try:
-        characters, world = load_characters(scenario_path)
-    except Exception as e:
-        await update.message.reply_text(f"❗ Не удалось загрузить сценарий: {e}")
-        return
-
-    char = characters.get(role_key)
-    if not char:
-        await update.message.reply_text(
-            f"⚠️ Персонаж *{role_key}* не найден в текущем сценарии *{world.get('name', scenario_file)}*.\n"
-            f"Пожалуйста, выбери персонажа заново: /role",
-            parse_mode="Markdown"
-        )
-        return
-
-
-    # Загружаем соответствующий сценарий
-    scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
-    try:
-        characters, world = load_characters(scenario_path)
-    except Exception as e:
-        await update.message.reply_text(f"❗ Ошибка загрузки сценария '{scenario_file}': {e}")
-        return
-
-    # Сохраняем мир глобально для base_prompt
-    global world_info
-    world_info = world
-
-    # Получаем роль или первую по умолчанию
+    role_entry = bot_state.get_user_role(user_id)
     default_role = next(iter(characters))
-    role_key = role_key or default_role
-    char = characters.get(role_key)
+    role_key = role_entry.get("role") if role_entry else default_role
 
-    if not char:
-        await update.message.reply_text("⚠️ Выбранный персонаж не найден в этом сценарии. Пожалуйста, выбери роль заново: /role")
-        return
-
-    # логируем сообщение пользователя в архив
+    # Логируем сообщение пользователя в архив
     append_to_archive_user(
         user_id,
         role_key,
@@ -661,70 +667,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     )
 
     # ========== Токенизированная история ==========
-    user_role_description = world_info.get("user_role", "")
-    world_prompt = world_info.get("system_prompt", "")
+    user_role_description = world.get("user_role", "")
+    world_prompt = world.get("system_prompt", "")
     base_prompt = f"{world_prompt}\nПользователь — {user_role_description}.\n{char['prompt']}\n"
 
-    tokens_used = len(enc.encode(base_prompt))
+    tokens_used = len(bot_state.enc.encode(base_prompt))
 
-    # history = user_history.get(user_id, [])
-    # Получаем историю и данные пользователя
-
-    user_data = user_history.get(user_id)
-
-    # Если данных нет — создаём новую структуру
-    if user_data is None:
-        user_data = {
-            "history": [],
-            "last_input": "",
-            "last_bot_id": None
-        }
-
-    history = user_data.get("history", [])
-
-
+    # Получаем историю
+    user_data = bot_state.get_user_history(user_id)
+    history = user_data["history"]
     trimmed_history = []
 
-     # обрезка истории по токенам
     for message in reversed(history):
-        message_tokens = len(enc.encode(message + "\n"))
-        if tokens_used + message_tokens < MAX_TOKENS:
+        message_tokens = len(bot_state.enc.encode(message + "\n"))
+        if tokens_used + message_tokens < bot_state.max_tokens:
             trimmed_history.insert(0, message)
             tokens_used += message_tokens
         else:
             break
 
-    
-    user_emoji = world_info.get("user_emoji", "🧑")
+    user_emoji = world.get("user_emoji", "🧑")
     user_message = f"{user_emoji}: {user_input}"
-    
-    user_message_tokens = len(enc.encode(user_message + "\n"))
+
+    user_message_tokens = len(bot_state.enc.encode(user_message + "\n"))
     total_prompt_tokens = tokens_used + user_message_tokens
 
-    if tokens_used + user_message_tokens < MAX_TOKENS:
+    if total_prompt_tokens < bot_state.max_tokens:
         trimmed_history.append(user_message)
     else:
         trimmed_history = [user_message]
 
-    #user_history[user_id] = trimmed_history
-    # Сохраняем обновлённую историю и последнее сообщение
-    user_data["history"] = trimmed_history
-    user_data["last_input"] = user_input  # сохраняем последний ввод
-    user_history[user_id] = user_data
-
+    bot_state.update_user_history(user_id, trimmed_history, last_input=user_input)
     save_history()
 
     history_text = "\n".join(trimmed_history)
     prompt = f"{base_prompt}{history_text}\n{char['name']}:"
 
     payload = {
-        "model": MODEL,
+        "model": bot_state.model,
         "prompt": prompt,
         "stream": False
     }
 
-    # ====== DEBUG ======
-    if DEBUG_MODE:
+    if bot_state.debug_mode:
         print("\n" + "="*60)
         print("🟢 PROMPT, отправленный в модель (текст):\n")
         print(prompt)
@@ -735,11 +720,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     try:
         thinking_message = await update.message.reply_text(f"{char['name']} думает... 🤔")
-        response = requests.post(OLLAMA_URL, json=payload, timeout=30)
+        response = requests.post(bot_state.ollama_url, json=payload, timeout=30)
         data = response.json()
         reply = data["response"]
 
-        # сохраняем в историю и лог
         trimmed_history.append(f"{char['name']}: {reply}")
         save_history()
 
@@ -754,42 +738,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             world_name=world.get("name", "")
         )
 
-        if DEBUG_MODE:
+        if bot_state.debug_mode:
             print("📤 Ответ:")
             print(reply)
             print("="*60)
-            print(f"📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {MAX_TOKENS}")
-
+            print(f"📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {bot_state.max_tokens}")
 
     except Exception as e:
         reply = f"Ошибка запроса к модели: {e}"
-    
+
     await thinking_message.delete()
 
-    # await update.message.reply_text(reply)
-
-    # html_reply = markdown_to_html(reply)
-    # await update.message.reply_text(html_reply, parse_mode="HTML")
-
     formatted_reply = safe_markdown_v2(reply)
-    # await update.message.reply_text(formatted_reply, parse_mode="MarkdownV2")
     bot_msg = await update.message.reply_text(formatted_reply, parse_mode="MarkdownV2")
-    user_data["last_bot_id"] = bot_msg.message_id
+    bot_state.update_user_history(user_id, trimmed_history, last_bot_id=bot_msg.message_id)
 
-    
 
-# 👉 Всё основное внутри async main()
+
+
+
+
+# Основная функция для запуска бота
 async def main():
-    
-    global user_roles
-    user_roles = load_roles()
 
-    global user_history
-    user_history = load_history()
-    
-    
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    init_config()
 
+    if not bot_state.bot_token:
+        raise ValueError("Не указан токен бота в config.json!")
+
+    app = ApplicationBuilder().token(bot_state.bot_token).build()
+
+    # Добавление хендлеров
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("role", set_role))
@@ -801,8 +780,7 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, handle_force_reply))
     app.add_handler(CallbackQueryHandler(scenario_button, pattern="^scenario:"))
-    app.add_handler(CallbackQueryHandler(role_button,)) # pattern="^[a-zа-яё_]+$"))
-    
+    app.add_handler(CallbackQueryHandler(role_button))
 
     await app.bot.set_my_commands([
         BotCommand("scenario", "Выбрать сценарий"),
@@ -816,15 +794,22 @@ async def main():
     ])
 
     print("🚀 Запуск бота...")
-    if DEBUG_MODE:
-        print(f"📦 Используемая модель: {MODEL}")
-        print(f"🔗 URL модели: {OLLAMA_URL}")
-        print(f"🧮 Максимум токенов: {MAX_TOKENS}")
-        print(f"🔤 Кодировка для tiktoken: {ENCODING_NAME}")
+    if bot_state.debug_mode:
+        print(f"📦 Используемая модель: {bot_state.model}")
+        print(f"🔗 URL модели: {bot_state.ollama_url}")
+        print(f"🧮 Максимум токенов: {bot_state.max_tokens}")
+        print(f"🔤 Кодировка для tiktoken: {bot_state.enc}")
+
     await app.run_polling()
+
+
+
+
 
 # Запуск асинхронной функции
 if __name__ == "__main__":
     import nest_asyncio
     nest_asyncio.apply()
     asyncio.get_event_loop().run_until_complete(main())
+
+
