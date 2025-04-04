@@ -35,6 +35,14 @@ class BotState:
         self.debug_mode = True
         self.bot_token = ""
 
+    def __str__(self):
+        return (
+            f"BotState(model={self.model}, url={self.ollama_url}, "
+            f"max_tokens={self.max_tokens}, debug={self.debug_mode} ,"
+            f"roles={len(self.user_roles)}, history={len(self.user_history)}, "
+            f"bot_token={self.bot_token}, enc={self.enc})"
+        )
+    
     # === РОЛИ ===
     def get_user_role(self, user_id):
         return self.user_roles.get(str(user_id))
@@ -766,6 +774,9 @@ async def main():
     if not bot_state.bot_token:
         raise ValueError("Не указан токен бота в config.json!")
 
+    load_roles()
+    load_history()
+
     app = ApplicationBuilder().token(bot_state.bot_token).build()
 
     # Добавление хендлеров
@@ -795,10 +806,7 @@ async def main():
 
     print("🚀 Запуск бота...")
     if bot_state.debug_mode:
-        print(f"📦 Используемая модель: {bot_state.model}")
-        print(f"🔗 URL модели: {bot_state.ollama_url}")
-        print(f"🧮 Максимум токенов: {bot_state.max_tokens}")
-        print(f"🔤 Кодировка для tiktoken: {bot_state.enc}")
+        print(bot_state)
 
     await app.run_polling()
 
