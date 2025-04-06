@@ -104,6 +104,7 @@ class BotState:
         return self.user_world_info.get(str(user_id), {})
     
     # === ВАЛИДАЦИЯ ПОСЛЕДНЕЙ ПАРЫ ===
+    """
     def is_valid_last_exchange(self, user_id, scenario_file, char_name, world):
         data = self.get_user_history(user_id, scenario_file)
         history = data.get("history", [])
@@ -117,6 +118,26 @@ class BotState:
         assistant_prefix = f"{char_name}:"
 
         return last_msg.startswith(user_prefix) and last_reply.startswith(assistant_prefix)
+"""
+    def is_valid_last_exchange(self, user_id, scenario_file, char_name, world):
+        data = self.get_user_history(user_id, scenario_file)
+        history = data.get("history", [])
+
+        user_prefix = f"{world.get('user_emoji', '👤')}:"
+        assistant_prefix = f"{char_name}:"
+
+        # если хватает истории — проверяем по старому методу
+        if len(history) >= 2:
+            last_msg = history[-2]
+            last_reply = history[-1]
+            if last_msg.startswith(user_prefix) and last_reply.startswith(assistant_prefix):
+                return True
+
+        # сверяем с last_input и last_bot_id
+        if data.get("last_input") and data.get("last_bot_id") is not None:
+            return True
+
+        return False
 
 
 bot_state = BotState()
@@ -781,11 +802,34 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 История пока пуста. Напиши что-нибудь!")
         return
 
-    # Ограничим длину текста, чтобы Telegram не ругался
+    # Получим имя и эмодзи персонажа
+    characters, world = load_characters(os.path.join(SCENARIOS_DIR, scenario_file))
+    char_key = role_entry.get("role")
+    char = characters.get(char_key, {})
+    char_name = char.get("name", "🤖")
+    char_emoji = char.get("emoji", "")
+    user_emoji = world.get("user_emoji", "🧑")
+
+    # Готовим строки с форматированием
+    formatted_lines = []
+    for line in history:
+        if line.startswith("Narrator:"):
+            text = line[len("Narrator:"):].strip()
+            formatted_lines.append(f"📜 {text}")
+        elif line.startswith(f"{user_emoji}:"):
+            text = line[len(f"{user_emoji}:"):].strip()
+            formatted_lines.append(f"{user_emoji} {text}")
+        elif line.startswith(f"{char_emoji} {char_name}:"):
+            text = line[len(f"{char_name}:"):].strip()
+            formatted_lines.append(f"{char_emoji} {char_name}: {text}")
+        else:
+            formatted_lines.append(line)
+    
+    # Склейка по частям, если слишком длинно
     MAX_LENGTH = 4096
     chunks = []
     current = ""
-    for line in history:
+    for line in formatted_lines:
         if len(current) + len(line) + 1 > MAX_LENGTH:
             chunks.append(current)
             current = ""
@@ -932,6 +976,16 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_emoji = world.get("user_emoji", "👤")
         user_role_line = f"\n🎭 *Ты в этом мире:* {user_emoji} _{user_role}_" if user_role else ""
 
+        await query.edit_message_text(
+            f"🎮 Сценарий *{world.get('name', selected_file)}* загружен! {world.get('emoji', '')}\n"
+            f"📝 _{world.get('description', '')}_\n"
+            f"{user_role_line}\n\n"
+            f"*Доступные роли:*\n{roles_text}\n\n"
+            f"⚠️ Пожалуйста, выбери персонажа для этого мира: /role\n"
+            f"💡 Можешь потом добавить сюжетную сцену: /scene 🎬",
+            parse_mode="Markdown"
+        )
+
         # ⏳ Если есть intro_scene и история пустая — показываем интро
         intro_scene = world.get("intro_scene", "")
         user_data = bot_state.get_user_history(user_id, selected_file)
@@ -942,16 +996,30 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_history()
             formatted_intro = safe_markdown_v2(intro_scene)
             await query.message.reply_text(formatted_intro, parse_mode="MarkdownV2")
+        
+        # 📜 Если история уже есть — покажем последние 2 сообщения
+        elif user_data["history"]:
+            recent_messages = user_data["history"][-2:]
+            char_key = bot_state.get_user_role(user_id).get("role")
+            char = characters.get(char_key, {})
+            char_name = char.get("name", "🤖")
+            char_emoji = char.get("emoji", "")
+            user_emoji = world.get("user_emoji", "🧑")
 
-        await query.edit_message_text(
-            f"🎮 Сценарий *{world.get('name', selected_file)}* загружен! {world.get('emoji', '')}\n"
-            f"📝 _{world.get('description', '')}_\n"
-            f"{user_role_line}\n\n"
-            f"*Доступные роли:*\n{roles_text}\n\n"
-            f"⚠️ Пожалуйста, выбери персонажа для этого мира: /role\n"
-            f"💡 Можешь потом добавить сюжетную сцену: /scene 🎬",
-            parse_mode="Markdown"
-        )
+            for line in recent_messages:
+                if line.startswith("Narrator:"):
+                    continue
+                elif line.startswith(f"{user_emoji}:"):
+                    text = line[len(f"{user_emoji}:"):].strip()
+                    formatted = f"{user_emoji} {text}"
+                elif line.startswith(f"{char_name}:"):
+                    text = line[len(f"{char_name}:"):].strip()
+                    formatted = f"{char_emoji} {char_name}: {text}"
+                else:
+                    formatted = line
+
+                await query.message.reply_text(safe_markdown_v2(formatted), parse_mode="MarkdownV2")
+
 
     except Exception as e:
         await query.edit_message_text(f"⚠️ Ошибка при загрузке сценария: {e}")
@@ -1112,7 +1180,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     thinking_message = None
 
     try:
-        thinking_message = await update.message.reply_text(f"{char['name']} думает... 🤔")
+        emoji = char.get("emoji", "")
+        thinking_message = await update.message.reply_text(f"{emoji} {char['name']} думает... 🤔")
         
         # 🌍 Перевод prompt на английский, если включён флаг use_translation
         role_entry = bot_state.get_user_role(user_id)
@@ -1141,9 +1210,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
                 print("🈶 Translated RESPONSE to RUSSIAN:\n")
                 print(reply)
                 print("=" * 60)
-                print(f"📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {bot_state.max_tokens}")
+        
+        if bot_state.debug_mode:
+            print(f"\n📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {bot_state.max_tokens}\n")
                 
-        trimmed_history.append(f"{char['name']}: {reply}")
+        trimmed_history.append(f"{char['emoji']} {char['name']}: {reply}")
         save_history()
 
         append_to_archive_user(
@@ -1168,7 +1239,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
                 if bot_state.debug_mode:
                     print(f"⚠️ Не удалось удалить сообщение: {e}")
 
-
+    # ⛔ Если ответ пустой — выводим предупреждение
+    if not reply.strip():
+        reply = "⚠️ Ошибка: пустой ответ от модели или переводчика. Попробуй ещё раз."
+        if bot_state.debug_mode:
+            print("⚠️ [Debug] Пустой ответ — заменён на предупреждение.")
+    else:
+        emoji = char.get("emoji", "")
+        reply_with_emoji = f"{emoji} {reply}".strip()
+        reply = reply_with_emoji
 
     formatted_reply = safe_markdown_v2(reply)
     bot_msg = await update.message.reply_text(formatted_reply, parse_mode="MarkdownV2")
