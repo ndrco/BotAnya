@@ -43,8 +43,7 @@ class BotState:
         self.min_p = 0.05
         self.num_predict = -1
         self.stop = None
-        self.use_translation = False
-
+        
     def __str__(self):
         return (
             f"BotState(model={self.model}, url={self.ollama_url}, "
@@ -58,10 +57,14 @@ class BotState:
     def get_user_role(self, user_id):
         return self.user_roles.get(str(user_id))
 
-    def set_user_role(self, user_id, role, scenario_file):
-        self.user_roles[str(user_id)] = {
+    def set_user_role(self, user_id, role, scenario_file=None, use_translation=False):
+        if user_id not in self.user_roles:
+            self.user_roles[user_id] = {}
+
+        self.user_roles[user_id] = {
             "role": role,
-            "scenario": scenario_file
+            "scenario": scenario_file,
+            "use_translation": use_translation,
         }
 
     def clear_user_role(self, user_id):
@@ -137,8 +140,7 @@ def init_config():
     bot_state.min_p = config.get("min_p", 0.05)
     bot_state.num_predict = config.get("num_predict", 200)
     bot_state.stop = config.get("stop", None)
-    bot_state.use_translation = config.get("use_translation", False)
-
+    
     try:
         bot_state.enc = tiktoken.get_encoding(config.get("tiktoken_encoding", "gpt2"))
     except Exception:
@@ -307,6 +309,7 @@ def get_user_character_and_world(user_id: str):
 
 
 
+
 # Функция для обрезки истории сообщений
 # мы будем выделять ключевые сообщения (system, narrator, scene и последние user/assistant)
 def smart_trim_history(history, enc, max_tokens=6000):
@@ -415,9 +418,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /scenario — выбрать сценарий с персонажами\n"
         "• /role — выбрать персонажа для ролевого общения\n"
         "• /scene — сгенерировать атмосферную сцену ✨\n\n"
-        "📌 Просто выбери роль, а затем пиши любое сообщение — я буду отвечать в её стиле!\n\n"
+        "• /lang — сменить язык думателя бота (EN/RUS). По умолчанию - RU.\n"
+        "* EN - бот умнее, но пльохо говорьить по рюськи. RU - глупее, но лучше знает русский язык.*\n\n"
+        "📌 Выбери сценарий и роль, а затем пиши любое сообщение — я буду отвечать в её стиле!\n\n"
         "*💡 Как писать действия:*\n"
-        "Ты можешь описывать свои действия, или дать укзания модели, а не только говорить:\n\n"
+        "Ты можешь описывать свои действия, или дать указания модели, а не только говорить:\n\n"
         "• Используй *звёздочки*:\n"
         "`*улыбается и машет рукой*`\n"
         "`*опиши место, куда мы пришли*`\n\n"
@@ -692,7 +697,6 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
        },
     }
 
-
     # DEBUG
     if bot_state.debug_mode:
         print("\n" + "="*60)
@@ -712,7 +716,9 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         thinking_message = await update.message.reply_text("🎬 Генерирую сцену... подожди немного ☕")
         
         # Перевод prompt, если включён use_translation
-        if bot_state.use_translation:
+        role_entry = bot_state.get_user_role(user_id)
+        use_translation = role_entry.get("use_translation", False)
+        if use_translation:
             translated_prompt = translate_prompt_to_english(prompt)
             if bot_state.debug_mode:
                 print("🈶 Translated PROMPT to ENGLISH (/scene):\n")
@@ -726,7 +732,7 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scene = data["response"].strip()
 
         # Перевод ответа, если включён use_translation
-        if bot_state.use_translation:
+        if use_translation:
             scene = translate_prompt_to_russian(scene)
             if bot_state.debug_mode:
                 print("🈶 Translated SCENE to RUSSIAN:\n")
@@ -788,7 +794,37 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chunks.append(current)
 
     for chunk in chunks:
-        await update.message.reply_text(f"📝 История:\n\n{chunk}", parse_mode="Markdown")
+        formatted_chunk = safe_markdown_v2(chunk)
+        await update.message.reply_text(f"📝 История:\n\n{formatted_chunk}", parse_mode="MarkdownV2")
+
+
+
+
+# Команда /lang — переключение языка думателя
+async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    char, world, _, scenario_file, error = get_user_character_and_world(user_id)
+    if error:
+        await update.message.reply_text(error)
+        return
+
+    role_entry = bot_state.get_user_role(user_id)
+    current_value = role_entry.get("use_translation", False)
+    new_value = not current_value
+
+    bot_state.set_user_role(
+        user_id,
+        role=role_entry.get("role"),
+        scenario_file=role_entry.get("scenario"),
+        use_translation=new_value
+    )
+
+    save_roles()
+
+    status = "включён 🌍" if new_value else "выключен 🔇"
+    await update.message.reply_text(f"Перевод {status}.\nТеперь модель будет {'думать на английском и отвечать по-русски' if new_value else 'работать напрямую на русском языке'} ☺️")
+
+
 
 
 
@@ -820,7 +856,11 @@ async def role_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ Ошибка: выбранный персонаж не найден в текущем сценарии.")
         return
 
-    bot_state.set_user_role(user_id, role_key, scenario_file)
+    # 💾 сохраняем текущий use_translation
+    use_translation = role_entry.get("use_translation", False)
+
+    # 📝 обновляем роль с сохранением флага use_translation
+    bot_state.set_user_role(user_id, role=role_key, scenario_file=scenario_file, use_translation=use_translation)
     save_roles()
 
     char = characters[role_key]
@@ -865,9 +905,13 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "last_bot_id": None
             }
 
+        # 📝 Получаем текущие настройки use_translation (если есть)
+        prev_role = bot_state.get_user_role(user_id)
+        use_translation = prev_role.get("use_translation", False) if prev_role else False        
+        
         # ❌ Удаляем текущую роль, но сохраняем выбор сценария
         bot_state.clear_user_role(user_id)
-        bot_state.set_user_role(user_id, None, selected_file)
+        bot_state.set_user_role(user_id, role=None, scenario_file=selected_file, use_translation=use_translation)
 
         save_roles()
         save_history()
@@ -1071,7 +1115,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         thinking_message = await update.message.reply_text(f"{char['name']} думает... 🤔")
         
         # 🌍 Перевод prompt на английский, если включён флаг use_translation
-        if bot_state.use_translation:
+        role_entry = bot_state.get_user_role(user_id)
+        use_translation = role_entry.get("use_translation", False)
+        if use_translation:
             translated_prompt = translate_prompt_to_english(prompt)
             if bot_state.debug_mode:
                 print("🈶 Translated PROMPT to ENGLISH:\n")
@@ -1089,7 +1135,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             print("="*60)
 
         # 🌍 Перевод ответа обратно на русский
-        if bot_state.use_translation:
+        if use_translation:
             reply = translate_prompt_to_russian(reply)
             if bot_state.debug_mode:
                 print("🈶 Translated RESPONSE to RUSSIAN:\n")
@@ -1157,6 +1203,7 @@ async def main():
     app.add_handler(CommandHandler("scene", scene_command))
     app.add_handler(CommandHandler("whoami", whoami_command))
     app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("lang", lang_command))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, handle_force_reply))
@@ -1171,6 +1218,7 @@ async def main():
         BotCommand("history", "Показать историю"),
         BotCommand("start", "Начать диалог"),
         BotCommand("help", "Помощь по командам"),
+        BotCommand("lang", "Переключить думатель EN/RU"),
         BotCommand("retry", "Повторить сообщение"),
         BotCommand("edit", "Редактировать сообщение"),
         BotCommand("reset", "Сбросить историю")
