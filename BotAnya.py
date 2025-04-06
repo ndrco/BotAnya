@@ -1,5 +1,6 @@
 import json
 import os
+from typing import List
 from datetime import datetime
 import asyncio
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, ForceReply
@@ -8,6 +9,7 @@ from telegram.helpers import escape_markdown
 import requests
 import re
 import tiktoken
+from translate_utils import translate_prompt_to_english, translate_prompt_to_russian
 
 
 # Путь к файлам и директориям
@@ -38,6 +40,10 @@ class BotState:
         self.ChatML = False
         self.temperature = 1.0
         self.top_p = 0.95
+        self.min_p = 0.05
+        self.num_predict = -1
+        self.stop = None
+        self.use_translation = False
 
     def __str__(self):
         return (
@@ -128,6 +134,10 @@ def init_config():
     bot_state.ChatML = config.get("ChatML", False)
     bot_state.temperature = config.get("temperature", 1.0)
     bot_state.top_p = config.get("top_p", 0.95)
+    bot_state.min_p = config.get("min_p", 0.05)
+    bot_state.num_predict = config.get("num_predict", 200)
+    bot_state.stop = config.get("stop", None)
+    bot_state.use_translation = config.get("use_translation", False)
 
     try:
         bot_state.enc = tiktoken.get_encoding(config.get("tiktoken_encoding", "gpt2"))
@@ -297,6 +307,47 @@ def get_user_character_and_world(user_id: str):
 
 
 
+# Функция для обрезки истории сообщений
+# мы будем выделять ключевые сообщения (system, narrator, scene и последние user/assistant)
+def smart_trim_history(history, enc, max_tokens=6000):
+    """
+    Умная обрезка истории:
+    - сохраняет system-подобные блоки (Narrator, сцены)
+    - сохраняет последние n реплик (user/assistant)
+    - укладывается в max_tokens (включая system prompt и другие части)
+    """
+    # 1. Сначала выделим Narrator-сцены и system-like элементы
+    preserved = []
+    dialogue = []
+
+    for msg in history:
+        if msg.startswith("Narrator:") or msg.startswith("<|im_start|>system") or msg.startswith("<|im_start|>scene"):
+            preserved.append(msg)
+        else:
+            dialogue.append(msg)
+
+    # 2. Подсчёт токенов
+    preserved_tokens = sum(len(enc.encode(m + "\n")) for m in preserved)
+    remaining_tokens = max_tokens - preserved_tokens
+
+    trimmed_dialogue = []
+    dialogue_tokens = 0
+
+    # 3. Берём последние сообщения из диалога, пока укладываемся в лимит
+    for msg in reversed(dialogue):
+        msg_tokens = len(enc.encode(msg + "\n"))
+        if dialogue_tokens + msg_tokens <= remaining_tokens:
+            trimmed_dialogue.insert(0, msg)
+            dialogue_tokens += msg_tokens
+        else:
+            break
+
+    result = preserved + trimmed_dialogue
+    total_tokens = preserved_tokens + dialogue_tokens
+    return result, total_tokens
+
+
+
 
 
 # Функция для обработки команды /start
@@ -306,12 +357,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     char, _, _, _, error = get_user_character_and_world(user_id)
     if error:
-        if "не выбрал персонажа" in error:
+        if "не выбрал персонажа" in error or "Не хватает информации" in error:
             # 💬 приветствие для новичка
             await update.message.reply_text(
                 "Приветик! 🐾 Я — ролевой бот, который может говорить от имени разных персонажей.\n\n"
                 "Сначала выбери сценарий: /scenario и с кем ты хочешь общаться: /role\n"
-                "А потом просто пиши — и начнём магическое общение! ✨"
+                "А потом просто пиши — и начнём магическое общение! ✨\n\n"
+                "💡 Хочешь сразу начать с атмосферной сцены?\n"
+                "Напиши команду /scene — и я опишу, как начинается твоё приключение 🎬"
             )
         else:
             # ⚠️ Остальные ошибки — показываем как есть
@@ -355,12 +408,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /start — начать общение с ботом\n"
         "• /help — показать это сообщение\n"
         "• /whoami — показать, кто ты в этом мире\n"
-        "• /reset — сбросить историю и роль\n"
+        "• /history — показать историю общения в этом мире\n"
+        "• /reset — сбросить историю\n"
         "• /retry — повторить последнее сообщение\n"
         "• /edit — отредактировать последнее сообщение\n"
         "• /scenario — выбрать сценарий с персонажами\n"
-        "• /role — выбрать персонажа для ролевого общения\n\n"
+        "• /role — выбрать персонажа для ролевого общения\n"
+        "• /scene — сгенерировать атмосферную сцену ✨\n\n"
         "📌 Просто выбери роль, а затем пиши любое сообщение — я буду отвечать в её стиле!\n\n"
+        "*💡 Как писать действия:*\n"
+        "Ты можешь описывать свои действия, или дать укзания модели, а не только говорить:\n\n"
+        "• Используй *звёздочки*:\n"
+        "`*улыбается и машет рукой*`\n"
+        "`*опиши место, куда мы пришли*`\n\n"
         "*Доступные роли:*\n"
         f"{roles_text}",
         parse_mode="Markdown"
@@ -402,17 +462,49 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
 
-    # Удаляем роль и историю из bot_state
-    bot_state.user_roles.pop(user_id, None)
-    bot_state.user_history.pop(user_id, None)
-    bot_state.user_world_info.pop(user_id, None)
+    role_entry = bot_state.get_user_role(user_id)
+    if not role_entry:
+        await update.message.reply_text("❗ Сначала выбери сценарий и роль: /scenario → /role")
+        return
 
-    save_roles()
+    scenario_file = role_entry.get("scenario")
+    if not scenario_file:
+        await update.message.reply_text("❗ У тебя не выбран сценарий. Напиши /scenario.")
+        return
+
+    # Обнуляем историю для текущего сценария
+    bot_state.user_history.setdefault(user_id, {})[scenario_file] = {
+        "history": [],
+        "last_input": "",
+        "last_bot_id": None
+    }
+
+    await update.message.reply_text(
+        "🔁 История очищена! Ты можешь начать диалог заново с текущим персонажем ✨\n\n"
+    )
+
+    # 🎬 Если в сценарии есть intro_scene — добавляем в историю
+    try:
+        _, world = load_characters(os.path.join(SCENARIOS_DIR, scenario_file))
+        intro_scene = world.get("intro_scene", "")
+        if intro_scene:
+            user_data = bot_state.get_user_history(user_id, scenario_file)
+            narrator_entry = f"Narrator: {intro_scene}"
+            user_data["history"].append(narrator_entry)
+            bot_state.update_user_history(user_id, scenario_file, user_data["history"])
+            save_history()
+            formatted_intro = safe_markdown_v2(intro_scene)
+            await update.message.reply_text(formatted_intro, parse_mode="MarkdownV2")
+    except Exception as e:
+        if bot_state.debug_mode:
+            print(f"⚠️ Не удалось загрузить intro_scene после reset: {e}")
+
     save_history()
 
     await update.message.reply_text(
-        "🔁 Всё сброшено! Можешь выбрать нового персонажа с помощью /scenario и /role 🧹"
+        "💡 Хочешь начать с сюжетной сцены? Попробуй /scene 🎬"
     )
+
 
 
 
@@ -546,6 +638,160 @@ async def scenario_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+# Команда /scene — сгенерировать сцену и добавить в историю как Narrator
+async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+
+    # Получаем персонажа и мир пользователя
+    char, world, _, scenario_file, error = get_user_character_and_world(user_id)
+    if error:
+        await update.message.reply_text(error, parse_mode="Markdown")
+        return
+
+    user_role = world.get("user_role", "неизвестная роль")
+    world_name = world.get("name", "мир фантазий")
+    world_prompt = world.get("system_prompt", "")
+
+    # Формируем prompt в зависимости от chatML-режима
+    if bot_state.ChatML:
+        prompt = (
+            f"<|im_start|>system\n"
+            f"{world_prompt.strip()}\n\n"
+            f"Ты пишешь сцену в жанре ролевой игры.\n"
+            f"Ты играешь за персонажа — ({char.get('emoji', '')}) {char['name']}, {char['description']}, который ощущает себя так: \"{char['prompt']}\".\n"
+            f"Пользователь играет роль главного героя — {user_role}.\n"
+            f"Опиши насыщенную, атмосферную и короткую сцену, как в визуальной новелле или аниме. "
+            f"Действие, диалог и настроение важны.\n"
+            f"Текст — от лица рассказчика.\n"
+            f"Начни диалог между персонажем ({char["name"]}) и пользователем (в роли: {user_role}).\n"
+            f"Пусть первый говорит персонаж ({char['name']}).\n\n"
+            f"<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+    else:
+        prompt = (
+            f"{world_prompt.strip()}\n\n"
+            f"Сгенерируй насыщенную, атмосферную сцену в жанре визуальной новеллы.\n"
+            f"Мир: {world_name}\n"
+            f"Главный герой — ({char.get('emoji', '')}) {char['name']}, {char['description']}, который ощущает себя так: \"{char['prompt']}\".\n"
+            f"Роль пользователя: {user_role}\n"
+            f"Опиши действия, диалоги, настроение.\n\n"
+            f"{char['name']}:"
+        )
+
+    payload = {
+        "model": bot_state.model,
+        "prompt": prompt,
+        "stream": False,                            # отключаем стриминг, хотим весь ответ сразу
+        "options": {
+            "temperature": bot_state.temperature,
+            "top_p": bot_state.top_p,
+            "min_p": bot_state.min_p,
+            "stop": bot_state.stop,
+            "num_ctx": bot_state.max_tokens,         # увеличиваем контекстное окно (если поддерживается моделью)
+       },
+    }
+
+
+    # DEBUG
+    if bot_state.debug_mode:
+        print("\n" + "="*60)
+        print("🎬 PROMPT для генерации сцены:")
+        print(prompt)
+        print("="*60)
+
+    try:
+        if bot_state.debug_mode:
+            print("\n" + "="*60)
+            print("🎬 PROMPT, отправленный в модель (сцена):\n")
+            print(payload["prompt"])
+            print("="*60)
+            print("📦 PAYLOAD (scene):")
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print("="*60)
+        thinking_message = await update.message.reply_text("🎬 Генерирую сцену... подожди немного ☕")
+        
+        # Перевод prompt, если включён use_translation
+        if bot_state.use_translation:
+            translated_prompt = translate_prompt_to_english(prompt)
+            if bot_state.debug_mode:
+                print("🈶 Translated PROMPT to ENGLISH (/scene):\n")
+                print(translated_prompt)
+                print("=" * 60)
+            payload["prompt"] = translated_prompt
+        
+        response = requests.post(bot_state.ollama_url, json=payload, timeout=bot_state.timeout)
+
+        data = response.json()
+        scene = data["response"].strip()
+
+        # Перевод ответа, если включён use_translation
+        if bot_state.use_translation:
+            scene = translate_prompt_to_russian(scene)
+            if bot_state.debug_mode:
+                print("🈶 Translated SCENE to RUSSIAN:\n")
+                print(scene)
+                print("=" * 60)
+
+        if bot_state.debug_mode:
+            print("📜 Сгенерированная сцена:\n")
+            print(scene)
+            print("="*60)
+        await thinking_message.delete()
+
+    except Exception as e:
+        scene = f"⚠️ Ошибка генерации сцены: {e}"
+
+    # 💾 Добавляем сцену в историю как Narrator
+    user_data = bot_state.get_user_history(user_id, scenario_file)
+    narrator_entry = f"Narrator: {scene}"
+    user_data["history"].append(narrator_entry)
+    bot_state.update_user_history(user_id, scenario_file, user_data["history"])
+    save_history()
+
+    # 📨 Отправляем пользователю
+    formatted_scene = safe_markdown_v2(scene)
+    await update.message.reply_text(formatted_scene, parse_mode="MarkdownV2")
+
+
+
+
+
+# Команда /history — показать полную историю из текущего мира
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+
+    # Получаем персонажа и сценарий пользователя
+    role_entry = bot_state.get_user_role(user_id)
+    if not role_entry or not role_entry.get("scenario"):
+        await update.message.reply_text("❗ Сначала выбери сценарий с помощью /scenario.")
+        return
+
+    scenario_file = role_entry["scenario"]
+    user_data = bot_state.get_user_history(user_id, scenario_file)
+    history = user_data.get("history", [])
+
+    if not history:
+        await update.message.reply_text("📭 История пока пуста. Напиши что-нибудь!")
+        return
+
+    # Ограничим длину текста, чтобы Telegram не ругался
+    MAX_LENGTH = 4096
+    chunks = []
+    current = ""
+    for line in history:
+        if len(current) + len(line) + 1 > MAX_LENGTH:
+            chunks.append(current)
+            current = ""
+        current += line + "\n"
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        await update.message.reply_text(f"📝 История:\n\n{chunk}", parse_mode="Markdown")
+
+
+
 
 
 # Функция для обработки нажатия кнопки выбора роли
@@ -580,7 +826,7 @@ async def role_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     char = characters[role_key]
     await query.edit_message_text(
         f"Теперь ты общаешься с {char['name']} {char.get('emoji', '')}.\n\n"
-        f"Просто напиши что-нибудь — и я отвечу тебе в её стиле! 🎭"
+        f"Просто напиши что-нибудь — и я отвечу тебе! 🎭"
     )
 
 
@@ -642,12 +888,24 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_emoji = world.get("user_emoji", "👤")
         user_role_line = f"\n🎭 *Ты в этом мире:* {user_emoji} _{user_role}_" if user_role else ""
 
+        # ⏳ Если есть intro_scene и история пустая — показываем интро
+        intro_scene = world.get("intro_scene", "")
+        user_data = bot_state.get_user_history(user_id, selected_file)
+        if intro_scene and not user_data["history"]:
+            narrator_entry = f"Narrator: {intro_scene}"
+            user_data["history"].append(narrator_entry)
+            bot_state.update_user_history(user_id, selected_file, user_data["history"])
+            save_history()
+            formatted_intro = safe_markdown_v2(intro_scene)
+            await query.message.reply_text(formatted_intro, parse_mode="MarkdownV2")
+
         await query.edit_message_text(
             f"🎮 Сценарий *{world.get('name', selected_file)}* загружен! {world.get('emoji', '')}\n"
             f"📝 _{world.get('description', '')}_\n"
             f"{user_role_line}\n\n"
             f"*Доступные роли:*\n{roles_text}\n\n"
-            f"⚠️ Пожалуйста, выбери персонажа для этого мира: /role",
+            f"⚠️ Пожалуйста, выбери персонажа для этого мира: /role\n"
+            f"💡 Можешь потом добавить сюжетную сцену: /scene 🎬",
             parse_mode="Markdown"
         )
 
@@ -659,19 +917,42 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # Функция для сборки ChatML-промпта
-# (для Ollama и других моделей, поддерживающих ChatML)
-def build_chatml_prompt(system_prompt, history, user_emoji, char_name):
+def build_chatml_prompt(system_prompt: str, history: List[str], user_emoji: str, current_char_name: str) -> str:
+    """Сборка промпта в формате ChatML."""
     blocks = [f"<|im_start|>system\n{system_prompt}<|im_end|>"]
+
     for msg in history:
         if msg.startswith(f"{user_emoji}:"):
             text = msg[len(user_emoji)+1:].strip()
             blocks.append(f"<|im_start|>user\n{text}<|im_end|>")
-        elif msg.startswith(f"{char_name}:"):
-            text = msg[len(char_name)+1:].strip()
-            blocks.append(f"<|im_start|>assistant\n{text}<|im_end|>")
-    # Добавим пустой блок, чтобы модель начала говорить
-    blocks.append(f"<|im_start|>assistant\n")
+        elif msg.startswith("Narrator:"):
+            text = msg[len("Narrator:"):].strip()
+            blocks.append(f"<|im_start|>system\n{text}<|im_end|>")
+        else:
+            colon_index = msg.find(":")
+            if colon_index != -1:
+                speaker = msg[:colon_index].strip()
+                text = msg[colon_index + 1:].strip()
+
+                if speaker == current_char_name:
+                    blocks.append(f"<|im_start|>assistant\n{text}<|im_end|>")
+                else:
+                    blocks.append(f"<|im_start|>{speaker}\n{text}<|im_end|>")
+
+    blocks.append("<|im_start|>assistant\n")
     return "\n".join(blocks)
+
+
+
+# Функция для сборки обычного текстового промпта
+def build_plain_prompt(base_prompt: str, history: List[str], current_char_name: str) -> str:
+    """Сборка обычного текстового промпта."""
+    formatted_history = []
+    for msg in history:
+        formatted_history.append(msg)
+    return f"{base_prompt}\n" + "\n".join(formatted_history) + f"\n{current_char_name}:"
+
+
 
 
 
@@ -716,27 +997,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     # Получаем историю
     user_data = bot_state.get_user_history(user_id, scenario_file)
-    history = user_data["history"]
-    trimmed_history = []
 
-    for message in reversed(history):
-        message_tokens = len(bot_state.enc.encode(message + "\n"))
-        if tokens_used + message_tokens < bot_state.max_tokens:
-            trimmed_history.insert(0, message)
-            tokens_used += message_tokens
-        else:
-            break
+    history = user_data["history"]
+    trimmed_history, tokens_used = smart_trim_history(history, bot_state.enc, bot_state.max_tokens - tokens_used)
+
 
     user_emoji = world.get("user_emoji", "🧑")
     user_message = f"{user_emoji}: {user_input}"
 
-    user_message_tokens = len(bot_state.enc.encode(user_message + "\n"))
-    total_prompt_tokens = tokens_used + user_message_tokens
 
-    if total_prompt_tokens < bot_state.max_tokens:
+    user_message_tokens = len(bot_state.enc.encode(user_message + "\n"))
+    # Добавим пользовательское сообщение, если оно влезает
+    if tokens_used + user_message_tokens <= bot_state.max_tokens:
         trimmed_history.append(user_message)
+        tokens_used += user_message_tokens
     else:
-        trimmed_history = [user_message]
+        # Обрезаем историю дополнительно, чтобы уместить последнее сообщение
+        while trimmed_history and tokens_used + user_message_tokens > bot_state.max_tokens:
+            removed = trimmed_history.pop(0)
+            tokens_used -= len(bot_state.enc.encode(removed + "\n"))
+
+        trimmed_history.append(user_message)
+        tokens_used += user_message_tokens
+    
+    total_prompt_tokens = tokens_used
 
     bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_input=user_input)
     save_history()
@@ -746,26 +1030,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         system_text = (
             f"{world_prompt.strip()}\n"
             f"Пользователь — {user_role_description.strip()}.\n"
-            f"{char['prompt'].strip()}"
+            f"{char['prompt'].strip()}\n"
+            f"Если пользователь пишет *в звёздочках* — это действие.\n"
+            f"Реагируй на поведение, не повторяя его в ответ.\n"
+            f"Отвечай кратко, по делу. Пиши как в визуальной новелле: короткие реплики, меньше описаний."
         )
         prompt = build_chatml_prompt(system_text, trimmed_history, user_emoji, char["name"])
-        payload = {
-            "model": bot_state.model,
-            "prompt": prompt,
-            "stream": False,
-            "temperature": bot_state.temperature,
-            "top_p": bot_state.top_p,
-        }
 
     else:
         # Используем обычный промпт
         history_text = "\n".join(trimmed_history)
-        prompt = f"{base_prompt}{history_text}\n{char['name']}:"
-        payload = {
-            "model": bot_state.model,
-            "prompt": prompt,
-            "stream": False
-        }
+        prompt = build_plain_prompt(base_prompt, history_text, char['name'])
+
+    payload = {
+        "model": bot_state.model,
+        "prompt": prompt,
+        "stream": False,                            # отключаем стриминг, хотим весь ответ сразу
+        "options": {
+            "temperature": bot_state.temperature,
+            "top_p": bot_state.top_p,
+            "min_p": bot_state.min_p,
+            "stop": bot_state.stop,
+            "num_ctx": bot_state.max_tokens,         # увеличиваем контекстное окно (если поддерживается моделью)
+            "num_predict": bot_state.num_predict,       # ограничиваем ответ ~50 токенами (аналог max_tokens=50)
+        },
+    }
 
     if bot_state.debug_mode:
         print("\n" + "="*60)
@@ -780,10 +1069,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     try:
         thinking_message = await update.message.reply_text(f"{char['name']} думает... 🤔")
+        
+        # 🌍 Перевод prompt на английский, если включён флаг use_translation
+        if bot_state.use_translation:
+            translated_prompt = translate_prompt_to_english(prompt)
+            if bot_state.debug_mode:
+                print("🈶 Translated PROMPT to ENGLISH:\n")
+                print(translated_prompt)
+                print("=" * 60)
+            payload["prompt"] = translated_prompt
+        
         response = requests.post(bot_state.ollama_url, json=payload, timeout=bot_state.timeout)
         data = response.json()
         reply = data["response"]
 
+        if bot_state.debug_mode:
+            print("📤 Ответ:")
+            print(reply)
+            print("="*60)
+
+        # 🌍 Перевод ответа обратно на русский
+        if bot_state.use_translation:
+            reply = translate_prompt_to_russian(reply)
+            if bot_state.debug_mode:
+                print("🈶 Translated RESPONSE to RUSSIAN:\n")
+                print(reply)
+                print("=" * 60)
+                print(f"📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {bot_state.max_tokens}")
+                
         trimmed_history.append(f"{char['name']}: {reply}")
         save_history()
 
@@ -797,12 +1110,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             scenario_file=scenario_file,
             world_name=world.get("name", "")
         )
-
-        if bot_state.debug_mode:
-            print("📤 Ответ:")
-            print(reply)
-            print("="*60)
-            print(f"📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {bot_state.max_tokens}")
 
     except Exception as e:
         reply = f"Ошибка запроса к модели: {e}"
@@ -847,7 +1154,10 @@ async def main():
     app.add_handler(CommandHandler("retry", retry_command))
     app.add_handler(CommandHandler("edit", edit_command))
     app.add_handler(CommandHandler("scenario", scenario_command))
+    app.add_handler(CommandHandler("scene", scene_command))
     app.add_handler(CommandHandler("whoami", whoami_command))
+    app.add_handler(CommandHandler("history", history_command))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, handle_force_reply))
     app.add_handler(CallbackQueryHandler(scenario_button, pattern="^scenario:"))
@@ -856,28 +1166,40 @@ async def main():
     await app.bot.set_my_commands([
         BotCommand("scenario", "Выбрать сценарий"),
         BotCommand("role", "Выбрать персонажа"),
+        BotCommand("scene", "Сгенерировать сюжетную сцену"),
         BotCommand("whoami", "Показать кто я"),
+        BotCommand("history", "Показать историю"),
         BotCommand("start", "Начать диалог"),
         BotCommand("help", "Помощь по командам"),
         BotCommand("retry", "Повторить сообщение"),
         BotCommand("edit", "Редактировать сообщение"),
-        BotCommand("reset", "Сбросить историю и роль")
+        BotCommand("reset", "Сбросить историю")
     ])
 
     print("🚀 Запуск бота...")
     if bot_state.debug_mode:
         print(bot_state)
 
-    await app.run_polling()
+    try:
+        await app.run_polling()
+    finally:
+        print("💾 Сохраняю историю и роли перед завершением...")
+        save_history()
+        save_roles()
+        print("✅ История и роли сохранены.")
+        print("🔚 Завершение работы.")
+   
 
 
 
-
-
-# Запуск асинхронной функции
 if __name__ == "__main__":
     import nest_asyncio
+    import asyncio
+
     nest_asyncio.apply()
-    asyncio.get_event_loop().run_until_complete(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("🛑 Бот остановлен вручную (Ctrl+C)")
 
 
