@@ -1,0 +1,5 @@
+python-telegram-bot==20.7
+requests>=2.28.0
+tiktoken>=0.5.1
+nest_asyncio>=1.5.8
+deep-translator>=1.11.4
