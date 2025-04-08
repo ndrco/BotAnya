@@ -104,21 +104,6 @@ class BotState:
         return self.user_world_info.get(str(user_id), {})
     
     # === ВАЛИДАЦИЯ ПОСЛЕДНЕЙ ПАРЫ ===
-    """
-    def is_valid_last_exchange(self, user_id, scenario_file, char_name, world):
-        data = self.get_user_history(user_id, scenario_file)
-        history = data.get("history", [])
-        if len(history) < 2:
-            return False
-
-        last_msg = history[-2]
-        last_reply = history[-1]
-
-        user_prefix = f"{world.get('user_emoji', '👤')}:"
-        assistant_prefix = f"{char_name}:"
-
-        return last_msg.startswith(user_prefix) and last_reply.startswith(assistant_prefix)
-"""
     def is_valid_last_exchange(self, user_id, scenario_file, char_name, world):
         data = self.get_user_history(user_id, scenario_file)
         history = data.get("history", [])
@@ -416,6 +401,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if role_entry and "scenario" in role_entry:
         scenario_file = role_entry["scenario"]
         scenario_path = os.path.join(SCENARIOS_DIR, scenario_file)
+        use_translation = role_entry.get("use_translation", False)
+        lang = "EN" if use_translation else "RU"
+
         try:
             characters, _ = load_characters(scenario_path)
             role_lines = [
@@ -430,24 +418,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🆘 *Помощь*\n\n"
         "Вот что я умею:\n"
         "• /start — начать общение с ботом\n"
-        "• /help — показать это сообщение\n"
-        "• /whoami — показать, кто ты в этом мире\n"
-        "• /history — показать историю общения в этом мире\n"
-        "• /reset — сбросить историю\n"
-        "• /retry — повторить последнее сообщение\n"
-        "• /edit — отредактировать последнее сообщение\n"
         "• /scenario — выбрать сценарий с персонажами\n"
         "• /role — выбрать персонажа для ролевого общения\n"
-        "• /scene — сгенерировать атмосферную сцену ✨\n\n"
+        "• /scene — сгенерировать атмосферную сцену ✨\n"
+        "• /whoami — показать, кто ты в этом мире\n"
+        "• /retry — перегенерировать последнее сообщение бота\n"
+        "• /edit — отредактировать свое последнее сообщение\n"
+        "• /history — показать историю общения в этом мире\n"
+        "• /reset — сбросить историю\n"
+        "• /help — показать это сообщение\n"
         "• /lang — сменить язык думателя бота (EN/RUS). По умолчанию - RU.\n"
-        "* EN - бот умнее, но пльохо говорьить по рюськи. RU - глупее, но лучше знает русский язык.*\n\n"
+        "* EN - бот умнее, но пльохо говорьить по рюськи. RU - глупее, но лучше знает русский язык.*\n"
+        f"Сейчас включен думатель: *{lang}*.\n\n"
         "📌 Выбери сценарий и роль, а затем пиши любое сообщение — я буду отвечать в её стиле!\n\n"
         "*💡 Как писать действия:*\n"
-        "Ты можешь описывать свои действия, или дать указания модели, а не только говорить:\n\n"
-        "• Используй *звёздочки*:\n"
+        "Ты можешь не только говорить, но и описывать свои действия, или дать указания модели.\n"
+        "Используй *звёздочки*:\n"
         "`*улыбается и машет рукой*`\n"
         "`*опиши место, куда мы пришли*`\n\n"
-        "*Доступные роли:*\n"
+        "*Доступные в текущем сценарии роли:*\n"
         f"{roles_text}",
         parse_mode="Markdown"
     )
@@ -805,9 +794,6 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Получим имя и эмодзи персонажа
     characters, world = load_characters(os.path.join(SCENARIOS_DIR, scenario_file))
     char_key = role_entry.get("role")
-    char = characters.get(char_key, {})
-    char_name = char.get("name", "🤖")
-    char_emoji = char.get("emoji", "")
     user_emoji = world.get("user_emoji", "🧑")
 
     # Готовим строки с форматированием
@@ -818,12 +804,16 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             formatted_lines.append(f"📜 {text}")
         elif line.startswith(f"{user_emoji}:"):
             text = line[len(f"{user_emoji}:"):].strip()
-            formatted_lines.append(f"{user_emoji} {text}")
-        elif line.startswith(f"{char_emoji} {char_name}:"):
-            text = line[len(f"{char_name}:"):].strip()
-            formatted_lines.append(f"{char_emoji} {char_name}: {text}")
+            formatted_lines.append(f"{user_emoji}: {text}")
         else:
-            formatted_lines.append(line)
+            # Проверяем всех персонажей из characters
+            for char_key, char_data in characters.items():
+                if line.startswith(f"{char_data['name']}:"):
+                    text = line[len(f"{char_data['name']}:"):].strip()
+                    formatted_lines.append(f"{char_data.get('emoji', '🤖')}: {text}")
+                    break
+            else:
+                formatted_lines.append(line)
     
     # Склейка по частям, если слишком длинно
     MAX_LENGTH = 4096
@@ -847,7 +837,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Команда /lang — переключение языка думателя
 async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    char, world, _, scenario_file, error = get_user_character_and_world(user_id)
+    _, _, _, scenario_file, error = get_user_character_and_world(user_id)
     if error:
         await update.message.reply_text(error)
         return
@@ -859,7 +849,7 @@ async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_state.set_user_role(
         user_id,
         role=role_entry.get("role"),
-        scenario_file=role_entry.get("scenario"),
+        scenario_file=scenario_file,
         use_translation=new_value
     )
 
@@ -1000,23 +990,30 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 📜 Если история уже есть — покажем последние 2 сообщения
         elif user_data["history"]:
             recent_messages = user_data["history"][-2:]
-            char_key = bot_state.get_user_role(user_id).get("role")
-            char = characters.get(char_key, {})
-            char_name = char.get("name", "🤖")
-            char_emoji = char.get("emoji", "")
             user_emoji = world.get("user_emoji", "🧑")
 
             for line in recent_messages:
                 if line.startswith("Narrator:"):
-                    continue
+                    text = line[len("Narrator:"):].strip()
+                    formatted =f"📜 {text}"
                 elif line.startswith(f"{user_emoji}:"):
                     text = line[len(f"{user_emoji}:"):].strip()
                     formatted = f"{user_emoji} {text}"
-                elif line.startswith(f"{char_name}:"):
-                    text = line[len(f"{char_name}:"):].strip()
-                    formatted = f"{char_emoji} {char_name}: {text}"
                 else:
-                    formatted = line
+                    # Проверяем всех персонажей
+                    found = False
+                    for char_key, char_data in characters.items():
+                        if line.startswith(f"{char_data['name']}:"):
+                            text = line[len(f"{char_data['name']}:"):].strip()
+                            formatted = f"{char_data.get('emoji', '🤖')} {text}"
+                            found = True
+                            break
+                    
+                    # Если не нашли совпадений с персонажами, оставляем как есть
+                    if not found:
+                        formatted = line
+
+
 
                 await query.message.reply_text(safe_markdown_v2(formatted), parse_mode="MarkdownV2")
 
@@ -1113,10 +1110,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     history = user_data["history"]
     trimmed_history, tokens_used = smart_trim_history(history, bot_state.enc, bot_state.max_tokens - tokens_used)
 
-
     user_emoji = world.get("user_emoji", "🧑")
     user_message = f"{user_emoji}: {user_input}"
-
 
     user_message_tokens = len(bot_state.enc.encode(user_message + "\n"))
     # Добавим пользовательское сообщение, если оно влезает
@@ -1157,14 +1152,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     payload = {
         "model": bot_state.model,
         "prompt": prompt,
-        "stream": False,                            # отключаем стриминг, хотим весь ответ сразу
+        "stream": False, 
         "options": {
             "temperature": bot_state.temperature,
             "top_p": bot_state.top_p,
             "min_p": bot_state.min_p,
             "stop": bot_state.stop,
-            "num_ctx": bot_state.max_tokens,         # увеличиваем контекстное окно (если поддерживается моделью)
-            "num_predict": bot_state.num_predict,       # ограничиваем ответ ~50 токенами (аналог max_tokens=50)
+            "num_ctx": bot_state.max_tokens,
+            "num_predict": bot_state.num_predict,
         },
     }
 
@@ -1214,7 +1209,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         if bot_state.debug_mode:
             print(f"\n📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {bot_state.max_tokens}\n")
                 
-        trimmed_history.append(f"{char['emoji']} {char['name']}: {reply}")
+        trimmed_history.append(f"{char['name']}: {reply}")
         save_history()
 
         append_to_archive_user(
@@ -1290,19 +1285,70 @@ async def main():
     app.add_handler(CallbackQueryHandler(role_button))
 
     await app.bot.set_my_commands([
+        BotCommand("start", "Начать диалог"),
         BotCommand("scenario", "Выбрать сценарий"),
         BotCommand("role", "Выбрать персонажа"),
         BotCommand("scene", "Сгенерировать сюжетную сцену"),
         BotCommand("whoami", "Показать кто я"),
+        BotCommand("retry", "Изменить последнее сообщение бота"),
+        BotCommand("edit", "Изменить свое последнее сообщение"),        
         BotCommand("history", "Показать историю"),
-        BotCommand("start", "Начать диалог"),
-        BotCommand("help", "Помощь по командам"),
+        BotCommand("reset", "Сбросить историю"),
         BotCommand("lang", "Переключить думатель EN/RU"),
-        BotCommand("retry", "Повторить сообщение"),
-        BotCommand("edit", "Редактировать сообщение"),
-        BotCommand("reset", "Сбросить историю")
+        BotCommand("help", "Помощь по командам")
     ])
 
+    # Назначаем post_shutdown-колбэк для сохранения данных при остановке
+    async def shutdown_callback(app):
+        print("💾 Сохраняю историю и роли перед завершением...")
+        save_history()
+        save_roles()
+        print("✅ История и роли сохранены.")
+        print("🔚 Завершение работы.")
+    app.post_shutdown = shutdown_callback
+
+    print("🚀 Запуск бота...")
+    if bot_state.debug_mode:
+        print(bot_state)
+
+    # Явно инициализируем и запускаем приложение
+    await app.initialize()   # Подготовка приложения (инициализация внутреннего состояния)
+    await app.start()        # Запуск фоновых задач (например, JobQueue)
+
+    # Запускаем polling (получение обновлений) в отдельной задаче
+    polling_task = asyncio.create_task(app.updater.start_polling())
+
+    # Ждем бесконечно – так наш код будет работать до Ctrl+C
+    try:
+        await asyncio.Future()  # Эта future никогда не завершится
+    except asyncio.CancelledError:
+        pass
+    finally:
+        polling_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await polling_task
+        await app.updater.stop()  # Останавливаем получение обновлений
+        await app.stop()          # Останавливаем фоновые задачи
+        await app.shutdown()      # Завершаем приложение
+        # Явно вызываем post_shutdown-колбэк, если он установлен
+        if app.post_shutdown:
+            await app.post_shutdown(app)
+
+
+
+
+
+# Запуск бота
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())    
+
+
+
+
+
+
+"""
     print("🚀 Запуск бота...")
     if bot_state.debug_mode:
         print(bot_state)
@@ -1328,5 +1374,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("🛑 Бот остановлен вручную (Ctrl+C)")
-
+"""
 

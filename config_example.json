@@ -12,7 +12,7 @@
   "ChatML": true,
   "debug_mode": true,
   "tiktoken_encoding": "gpt2",
-  "Telegram_bot_token": "7871191135:AAHq6rvRboG5aWKDS1q-vtp0EnC2yzmYtTw",
-  "scenario_file": "crashlanded_ship.json",
+  "Telegram_bot_token": "00000000000000000000000000000000000",
+  "scenario_file": "neko_school.json",
   "ollama_timeout": 240
 }
