@@ -1,3 +1,6 @@
+# translate_utils.py
+# This file is part of the BotAnya Telegram Bot project.
+
 import re
 from deep_translator import GoogleTranslator
 
