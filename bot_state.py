@@ -1,12 +1,13 @@
 # bot_state.py
 # This file is part of the BotAnya Telegram Bot project.
 
-import json, os, tiktoken
+import json
+import os
+from config import (CONFIG_FILE, CREDENTIALS_FILE, SCENARIOS_DIR, ROLES_FILE, HISTORY_FILE, LOG_DIR)
 from datetime import datetime
-from config import (CONFIG_FILE, SCENARIOS_DIR, ROLES_FILE, HISTORY_FILE, LOG_DIR)
 
 
-
+# BotState class to manage the state of the bot
 class BotState:
     def __init__(self):
 
@@ -14,38 +15,41 @@ class BotState:
         self.user_history = {}
         self.user_world_info = {}
         self.config = {}
-        self.max_tokens = 7000
-        self.enc = None
-        self.model = ""
-        self.ollama_url = ""
+        self.credentials = {}
         self.debug_mode = True
         self.bot_token = ""
-        self.timeout = 90
-        self.ChatML = False
-        self.temperature = 1.0
-        self.top_p = 0.95
-        self.min_p = 0.05
-        self.num_predict = -1
-        self.stop = None
-    
-    # === ROLES ===
 
+
+
+    # === ROLES ===
     def get_user_role(self, user_id):
         return self.user_roles.get(str(user_id))
 
-    def set_user_role(self, user_id, role, scenario_file=None, use_translation=False):
-        if user_id not in self.user_roles:
-            self.user_roles[user_id] = {}
 
-        self.user_roles[user_id] = {
-            "role": role,
-            "scenario": scenario_file,
-            "use_translation": use_translation,
-        }
+    def set_user_role(self, user_id, role=None, scenario_file=None, use_translation=None, service=None):
+        user_id = str(user_id)
+        role_data = self.user_roles.get(user_id, {})
+
+        if role is not None:
+            role_data["role"] = role
+
+        if scenario_file is not None:
+            role_data["scenario"] = scenario_file
+
+        if use_translation is not None:
+            role_data["use_translation"] = use_translation
+
+        if service is not None:
+            role_data["service"] = service
+
+        self.user_roles[user_id] = role_data
+
 
     def clear_user_role(self, user_id):
-        if str(user_id) in self.user_roles:
-            self.user_roles[str(user_id)]["role"] = None
+        user_id = str(user_id)
+        if user_id in self.user_roles:
+            self.user_roles[user_id]["role"] = None
+
 
     # Function to get user character and world
     def get_user_character_and_world(self, user_id: str):
@@ -79,17 +83,26 @@ class BotState:
                 f"Пожалуйста, выбери нового: /role"
             )
 
-        return char, world, characters, scenario_file, None        
+        return char, world, characters, scenario_file, None
+
+
+    def get_user_service_config(self, user_id):
+        user_id = str(user_id)
+        user_entry = self.user_roles.get(user_id, {})
+        service_key = user_entry.get("service", self.config.get("default_service"))
+        services = self.config.get("services", {})
+        return services.get(service_key)
+    
 
 
     # === HISTORY ===
-
     def get_user_history(self, user_id, scenario_file):
         return self.user_history.setdefault(str(user_id), {}).setdefault(scenario_file, {
             "history": [],
             "last_input": "",
             "last_bot_id": None
         })
+
 
     def update_user_history(self, user_id, scenario_file, history, last_input="", last_bot_id=None):
         data = self.get_user_history(user_id, scenario_file)
@@ -107,6 +120,7 @@ class BotState:
             data["history"] = data["history"][:-2]
             return True
         return False
+
 
     # Logging user interactions
     def append_to_archive_user(self,
@@ -143,16 +157,15 @@ class BotState:
 
 
     # === WORLD_INFO ===
-
     def set_world_info(self, user_id, world_data):
         self.user_world_info[str(user_id)] = world_data
+
 
     def get_world_info(self, user_id):
         return self.user_world_info.get(str(user_id), {})
     
 
     # === LAST PAIR VALIDATION ===
-
     def is_valid_last_exchange(self, user_id, scenario_file, char_name, world):
         data = self.get_user_history(user_id, scenario_file)
         history = data.get("history", [])
@@ -172,15 +185,18 @@ class BotState:
             return True
 
         return False
-    
+
+
     def __str__(self):
         return (
-            f"BotState(model={self.model}, url={self.ollama_url}, "
-            f"max_tokens={self.max_tokens}, debug={self.debug_mode} ,"
-            f"roles={len(self.user_roles)}, history={len(self.user_history)}, "
-            f"bot_token={self.bot_token}, enc={self.enc}), "
-            f"timeout={self.timeout}, ChatML={self.ChatML}"
-        )    
+            f"BotState:\n"
+            f"• Config: {json.dumps(self.config, indent=2, ensure_ascii=False)}\n"
+            f"• Debug Mode: {self.debug_mode}\n"
+            f"• User Roles: {len(self.user_roles)}\n"
+            f"• User Histories: {len(self.user_history)}"
+        )
+    
+
 
 
 # BotState instance
@@ -188,43 +204,45 @@ bot_state = BotState()
 
 
 
+
 # Configuration and scenario loading
 def init_config():
-    config = load_config()
+    bot_state.config, bot_state.credentials = load_config()
+    bot_state.debug_mode = bot_state.config.get("debug_mode", True)
+    bot_state.bot_token = bot_state.credentials.get("telegram_bot_token", "")
 
-    bot_state.config = config
-    bot_state.max_tokens = config.get("max_tokens", 7000)
-    bot_state.model = config.get("model", "saiga_nemo_12b.Q8_0:latest")
-    bot_state.ollama_url = config.get("ollama_url", "http://localhost:11434/api/generate")
-    bot_state.debug_mode = config.get("debug_mode", True)
-    bot_state.bot_token = config.get("Telegram_bot_token", "")
-    bot_state.timeout = config.get("ollama_timeout", 90)
-    bot_state.ChatML = config.get("ChatML", False)
-    bot_state.temperature = config.get("temperature", 1.0)
-    bot_state.top_p = config.get("top_p", 0.95)
-    bot_state.min_p = config.get("min_p", 0.05)
-    bot_state.num_predict = config.get("num_predict", 200)
-    bot_state.stop = config.get("stop", None)
-    
-    try:
-        bot_state.enc = tiktoken.get_encoding(config.get("tiktoken_encoding", "gpt2"))
-    except Exception:
-        print("⚠️ Не удалось найти энкодер, использую gpt2 по умолчанию.")
-        bot_state.enc = tiktoken.get_encoding("gpt2")
+    if bot_state.debug_mode:
+        print("📦 Конфигурация загружена.")
 
 
 
-
-# Loading configuration from config file
+# Loading configuration from config file and credentials
 def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if data.get("debug_mode", True):
-                print("🛠️ [DEBUG] Загружен config.json:")
-                print(json.dumps(data, indent=2, ensure_ascii=False))
-            return data
-    raise FileNotFoundError("Файл config.json не найден!")
+    if not os.path.exists(CONFIG_FILE):
+        raise FileNotFoundError("Файл config.json не найден!")
+
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if data.get("debug_mode", True):
+        print("🛠️ [DEBUG] Загружен config.json:")
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+
+    # Loading credentials
+    if not os.path.exists(CREDENTIALS_FILE):
+        raise FileNotFoundError("Файл credentials.json не найден!")
+
+    with open(CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+        credentials = json.load(f)
+
+    if data.get("debug_mode", True):
+        print("🛠️ [DEBUG] Загружены credentials.json:")
+        print(json.dumps(credentials, indent=2, ensure_ascii=False))
+
+    return data, credentials
+
+          
+
 
 
 

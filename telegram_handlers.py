@@ -1,19 +1,25 @@
 # telegram_handlers.py
 # This file is part of the BotAnya Telegram Bot project.
 
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, ForceReply
-from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from bot_state import bot_state
-import json, os
+import json
+import os
+import tiktoken
+from telegram import Update, BotCommand, InlineKeyboardButton,\
+                         InlineKeyboardMarkup, CallbackQuery, ForceReply
+from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, \
+                         ContextTypes, filters
 from translate_utils import translate_prompt_to_english, translate_prompt_to_russian
-from config import (CONFIG_FILE, SCENARIOS_DIR)
 from bot_state import bot_state, load_characters, save_roles, save_history
-from utils import safe_markdown_v2, smart_trim_history, build_chatml_prompt, build_plain_prompt, wrap_chatml_prompt, build_scene_prompt
+from utils import safe_markdown_v2, smart_trim_history, build_chatml_prompt, \
+                        build_plain_prompt, wrap_chatml_prompt, build_scene_prompt
 from ollama_client import send_prompt_to_ollama
+from gigachat_client import send_prompt_to_gigachat
+from config import (CONFIG_FILE, SCENARIOS_DIR, MAX_LENGTH)
 
 
 
 def register_handlers(app):
+    app.add_handler(CommandHandler("service", service_command))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("scenario", scenario_command))
     app.add_handler(CommandHandler("role", set_role)) 
@@ -28,8 +34,11 @@ def register_handlers(app):
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, handle_force_reply))
+    
     app.add_handler(CallbackQueryHandler(scenario_button, pattern="^scenario:"))
+    app.add_handler(CallbackQueryHandler(service_button, pattern=r"^service:"))    
     app.add_handler(CallbackQueryHandler(role_button))
+
 
 
 
@@ -44,9 +53,32 @@ def get_bot_commands():
         BotCommand("edit", "Изменить свое последнее сообщение"),        
         BotCommand("history", "Показать историю"),
         BotCommand("reset", "Сбросить историю"),
-        BotCommand("lang", "Переключить думатель EN/RU"),
+        BotCommand("service", "Выбрать думатель"),
+        BotCommand("lang", "Язык думателя (EN/RU)"),
         BotCommand("help", "Помощь по командам")
     ]
+
+
+
+
+
+# /service handler
+async def service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+
+    services = bot_state.config.get("services", {})
+    user_role = bot_state.get_user_role(user_id) or {}
+    active_service = user_role.get("service", "ollama")
+
+    buttons = [
+        [InlineKeyboardButton(f"{'✅ ' if key == active_service else ''}{services[key].get('name', key)}", callback_data=f"service:{key}")]
+        for key in services.keys()
+    ]
+
+    await update.message.reply_text(
+        "🧠 Выбери думатель, который хочешь использовать:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 
 
@@ -75,7 +107,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     # 💕 Ok
     await update.message.reply_text(
-        f"Привет! Ты уже выбрал персонажа: *{char['name']}* {char.get('emoji', '')}\n\n"
+        f"Привет! Твой собеседник: *{char['name']}* {char.get('emoji', '')}\n\n"
         f"Можешь сразу написать что-нибудь — и я отвечу тебе как {char['name']}.\n"
         f"Если хочешь сменить роль — напиши /role 😊",
         parse_mode="Markdown"
@@ -156,18 +188,33 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_role = world.get("user_role", "неизвестная роль")
     world_prompt = world.get("system_prompt", "")
 
+    role_entry = bot_state.get_user_role(user_id)
+    service = role_entry.get("service", bot_state.config.get("default_service", "ollama"))
+
     # Prompt building
     base_prompt = build_scene_prompt(world_prompt, char, user_role)
-    if bot_state.ChatML:
+    service_config = bot_state.get_user_service_config(user_id)
+    if service_config.get("chatml", False):
         prompt = wrap_chatml_prompt(base_prompt)
     else:
         prompt = base_prompt
 
     thinking_message = await update.message.reply_text("🎬 Генерирую сцену... подожди немного ☕")
 
+    service_type = service_config.get("type")
+    match service_type:
+        case "ollama":
+            send_func = send_prompt_to_ollama
+        case "gigachat":
+            send_func = send_prompt_to_gigachat
+        case _:
+            raise ValueError(f"❌ Неизвестный тип сервиса: {service_type}")
+
+
     try:
         # Sending prompt to Ollama API
-        reply_scene = send_prompt_to_ollama(
+        reply_scene = send_func(
+            user_id,
             prompt,
             bot_state,
             use_translation=bot_state.get_user_role(user_id).get("use_translation", False),
@@ -197,25 +244,36 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
-    char, world, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
+    char, world, _, _, error = bot_state.get_user_character_and_world(user_id)
     if error:
         await update.message.reply_text(error, parse_mode="Markdown")
         return
 
     user_role_desc = world.get("user_role", "")
 
+    service_config = bot_state.get_user_service_config(user_id)
+    service_name = service_config.get("name", "")
+
+    role_entry = bot_state.get_user_role(user_id)
+    use_translation = role_entry.get("use_translation", False)
+    lang = "EN" if use_translation else "RU"
+
     text = (
+        f"🌍 *Мир:* {world.get('name', 'Неизвестный')} {world.get('emoji', '')}\n"
+        f"📝 _{world.get('description', '')}_\n"        
         f"👤 *Твой собеседник:* {char['name']} {char.get('emoji', '')}\n"
         f"🧬 _{char['description']}_\n\n"
-        f"🌍 *Мир:* {world.get('name', 'Неизвестный')} {world.get('emoji', '')}\n"
-        f"📝 _{world.get('description', '')}_\n"
     )
 
     if user_role_desc:
         user_emoji = world.get("user_emoji", "👤")
-        text += f"\n🎭 *Ты в этом мире:* {user_emoji} _{user_role_desc}_"
+        text += f"🎭 *Ты в этом мире:* {user_emoji} _{user_role_desc}_\n\n"
 
-    text += f"\n\n📂 *Сценарий:* `{scenario_file}`"
+    if service_name:
+        text += (
+            f"\n🧠*Включен думатель:* _{service_name}_"
+            f"\n🌍*Язык думателя:* _{lang}_"     
+        )
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -314,7 +372,6 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Getting characters and emoji for the user
     characters, world = load_characters(os.path.join(SCENARIOS_DIR, scenario_file))
-    char_key = role_entry.get("role")
     user_emoji = world.get("user_emoji", "🧑")
 
     # Formatting history
@@ -337,8 +394,6 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 formatted_lines.append(line)
     
     # Splitting into chunks if too long
-    # Telegram has a limit of 4096 characters per message
-    MAX_LENGTH = 4096
     chunks = []
     current = ""
     for line in formatted_lines:
@@ -351,7 +406,8 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for chunk in chunks:
         formatted_chunk = safe_markdown_v2(chunk)
-        await update.message.reply_text(f"📝 История:\n\n{formatted_chunk}", parse_mode="MarkdownV2")
+        await update.message.reply_text(f"📝 История:\n\n{formatted_chunk}",
+                                        parse_mode="MarkdownV2")
 
 
 
@@ -440,7 +496,7 @@ async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     role_entry = bot_state.get_user_role(user_id)
-
+    lang = "RU"
     roles_text = "⚠️ Сначала выбери сценарий через /scenario."
 
     if role_entry and "scenario" in role_entry:
@@ -458,10 +514,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             roles_text = "\n".join(role_lines)
         except Exception as e:
             roles_text = f"⚠️ Ошибка загрузки персонажей: {e}"
-
+    
+    service_config = bot_state.get_user_service_config(user_id)
+    service_name = service_config.get("name", "неизвестно")
+    
     await update.message.reply_text(
         "🆘 *Помощь*\n\n"
-        "Вот что я умею:\n"
+        "Вот что я умею:\n\n"
         "• /start — начать общение с ботом\n"
         "• /scenario — выбрать сценарий с персонажами\n"
         "• /role — выбрать персонажа для ролевого общения\n"
@@ -471,10 +530,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /edit — отредактировать свое последнее сообщение\n"
         "• /history — показать историю общения в этом мире\n"
         "• /reset — сбросить историю\n"
-        "• /help — показать это сообщение\n"
-        "• /lang — сменить язык думателя бота (EN/RUS). По умолчанию - RU.\n"
-        "* EN - бот умнее, но пльохо говорьить по рюськи. RU - глупее, но лучше знает русский язык.*\n"
-        f"Сейчас включен думатель: *{lang}*.\n\n"
+        "• /help — показать это сообщение\n\n"
+        "• /service — сменить думатель\n"
+        f"Сейчас включен думатель: *{service_name}*.\n\n"
+        "• /lang — сменить язык думателя бота (EN/RUS).\
+        *EN* -бот думает по английски, говорит по русски. *RU* - все по русски.\n"
+        f"Сейчас включен язык: *{lang}*.\n\n"
         "📌 Выбери сценарий и роль, а затем пиши любое сообщение — я буду отвечать в её стиле!\n\n"
         "*💡 Как писать действия:*\n"
         "Ты можешь не только говорить, но и описывать свои действия, или дать указания модели.\n"
@@ -492,7 +553,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # Function to handle incoming messages
-# (not commands) and process them as user input
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, override_input=None):
     user_input = override_input or update.message.text
 
@@ -527,27 +587,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     user_role_description = world.get("user_role", "")
     world_prompt = world.get("system_prompt", "")
     base_prompt = f"{world_prompt}\nПользователь — {user_role_description}.\n{char['prompt']}\n"
-    tokens_used = len(bot_state.enc.encode(base_prompt))
+
+    service_config = bot_state.get_user_service_config(user_id)
+
+    encoding = tiktoken.get_encoding(service_config.get("tiktoken_encoding", "gpt2"))
+    tokens_used = len(encoding.encode(base_prompt))
 
     # Getting user history and trimming it if necessary
     user_data = bot_state.get_user_history(user_id, scenario_file)
 
     history = user_data["history"]
-    trimmed_history, tokens_used = smart_trim_history(history, bot_state.enc, bot_state.max_tokens - tokens_used)
+    
+    max_tokens = service_config.get("max_tokens", 7000)
+    trimmed_history, tokens_used = smart_trim_history(history, encoding,
+                                                      max_tokens - tokens_used)
 
     user_emoji = world.get("user_emoji", "🧑")
     user_message = f"{user_emoji}: {user_input}"
-    user_message_tokens = len(bot_state.enc.encode(user_message + "\n"))
+    user_message_tokens = len(encoding.encode(user_message + "\n"))
 
     # Adding user message to trimmed history if it fits
-    if tokens_used + user_message_tokens <= bot_state.max_tokens:
+    if tokens_used + user_message_tokens <= max_tokens:
         trimmed_history.append(user_message)
         tokens_used += user_message_tokens
     else:
         # Trimming history until it fits
-        while trimmed_history and tokens_used + user_message_tokens > bot_state.max_tokens:
+        while trimmed_history and tokens_used + user_message_tokens > max_tokens:
             removed = trimmed_history.pop(0)
-            tokens_used -= len(bot_state.enc.encode(removed + "\n"))
+            tokens_used -= len(encoding.encode(removed + "\n"))
 
         trimmed_history.append(user_message)
         tokens_used += user_message_tokens
@@ -557,7 +624,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_input=user_input)
     save_history()
 
-    if bot_state.ChatML:
+    if service_config.get("chatml", False):
         # ChatML-prompt
         system_text = (
             f"{world_prompt.strip()}\n"
@@ -571,27 +638,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     else:
         # Plain text prompt
-        history_text = "\n".join(trimmed_history)
-        prompt = build_plain_prompt(base_prompt, history_text, char['name'])
+        prompt = build_plain_prompt(base_prompt, trimmed_history, char['name'])
 
     thinking_message = None
 
     try:
         emoji = char.get("emoji", "")
-        thinking_message = await update.message.reply_text(f"{emoji} {char['name']} думает... 🤔")
         
-        # ollama_client using
-        use_translation = role_entry.get("use_translation", False)
-        reply = send_prompt_to_ollama(
+        service_config = bot_state.get_user_service_config(user_id)
+        service_type = service_config.get("type")
+        match service_type:
+            case "ollama":
+                send_func = send_prompt_to_ollama
+            case "gigachat":
+                send_func = send_prompt_to_gigachat
+            case _:
+                raise ValueError(f"❌ Неизвестный тип сервиса: {service_type}")
+      
+        thinking_message = await update.message.reply_text(f"{emoji} {char['name']} думает... 🤔")
+                
+        reply = send_func(
+            user_id,
             prompt,
             bot_state,
-            use_translation=use_translation,
+            use_translation = role_entry.get("use_translation", False),
             translate_func=translate_prompt_to_english,
             reverse_translate_func=translate_prompt_to_russian
         )
 
         if bot_state.debug_mode:
-            print(f"\n📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {bot_state.max_tokens}\n")
+            print(f"\n📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {max_tokens}\n")
 
         # History update
         trimmed_history.append(f"{char['name']}: {reply}")
@@ -682,14 +758,10 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_roles()
         save_history()
 
-        bot_state.config["scenario_file"] = selected_file  # сохраняем только имя файла
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(bot_state.config, f, ensure_ascii=False, indent=2)
-
         # Roles list
         role_lines = [
             f"• *{char['name']}* — {char['description']} {char['emoji']}"
-            for key, char in characters.items()
+            for _, char in characters.items()
         ]
         roles_text = "\n".join(role_lines)
 
@@ -733,7 +805,7 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     # Checking every character for a match
                     found = False
-                    for char_key, char_data in characters.items():
+                    for _, char_data in characters.items():
                         if line.startswith(f"{char_data['name']}:"):
                             text = line[len(f"{char_data['name']}:"):].strip()
                             formatted = f"{char_data.get('emoji', '🤖')} {text}"
@@ -743,10 +815,7 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if not found:
                         formatted = line
 
-
-
                 await query.message.reply_text(safe_markdown_v2(formatted), parse_mode="MarkdownV2")
-
 
     except Exception as e:
         await query.edit_message_text(f"⚠️ Ошибка при загрузке сценария: {e}")
@@ -786,7 +855,8 @@ async def role_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     use_translation = role_entry.get("use_translation", False)
 
     # new translation flag
-    bot_state.set_user_role(user_id, role=role_key, scenario_file=scenario_file, use_translation=use_translation)
+    bot_state.set_user_role(user_id, role=role_key, scenario_file=scenario_file,
+                             use_translation=use_translation)
     save_roles()
 
     char = characters[role_key]
@@ -794,4 +864,41 @@ async def role_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Теперь ты общаешься с {char['name']} {char.get('emoji', '')}.\n\n"
         f"Просто напиши что-нибудь — и я отвечу тебе! 🎭"
     )
+
+
+
+# service_button handler
+async def service_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query: CallbackQuery = update.callback_query
+    await query.answer()
+
+    user_id = str(query.from_user.id)
+    selected_service = query.data.split(":", 1)[1].strip()
+
+    services = bot_state.config.get("services", {})
+    if selected_service not in services:
+        await query.edit_message_text("⚠️ Ошибка: выбранный сервис не найден.")
+        return
+
+    service_name = services[selected_service].get("name", selected_service)
+
+    # Current user role
+    user_role = bot_state.get_user_role(user_id) or {}
+
+    # "service" update
+    bot_state.set_user_role(
+        user_id,
+        role=user_role.get("role"),
+        scenario_file=user_role.get("scenario"),
+        use_translation=user_role.get("use_translation", False),
+        service=selected_service
+    )
+
+    if bot_state.debug_mode:
+        new_role = bot_state.get_user_role(user_id)
+        print(f"📄 user_role после обновления: {json.dumps(new_role, indent=2, ensure_ascii=False)}")
+
+    save_roles()
+
+    await query.edit_message_text(f"🧠 Теперь ты используешь думатель: *{service_name}* ✨", parse_mode="Markdown")
 

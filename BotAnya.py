@@ -6,9 +6,9 @@
 # The bot can also handle multiple characters and scenarios.
 # It is designed to be easy to use and customize.
 
-import asyncio, contextlib
+import asyncio
+import contextlib
 from telegram.ext import ApplicationBuilder
-from config import (CONFIG_FILE, SCENARIOS_DIR)
 from bot_state import bot_state, init_config, load_roles, save_roles, load_history, save_history
 from telegram_handlers import register_handlers, get_bot_commands
 
@@ -71,6 +71,7 @@ async def main():
         await app.shutdown()      # Stop the bot and clean up resources
         # post_shutdown-callback
         # This callback is called after the bot is stopped
+        
         if app.post_shutdown:
             await app.post_shutdown(app)
 
@@ -78,39 +79,5 @@ async def main():
 
 # Bot startup
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())    
-
-
-
-
-
-
-"""
-    print("🚀 Запуск бота...")
-    if bot_state.debug_mode:
-        print(bot_state)
-
-    try:
-        await app.run_polling()
-    finally:
-        print("💾 Сохраняю историю и роли перед завершением...")
-        save_history()
-        save_roles()
-        print("✅ История и роли сохранены.")
-        print("🔚 Завершение работы.")
-   
-
-
-
-if __name__ == "__main__":
-    import nest_asyncio
-    import asyncio
-
-    nest_asyncio.apply()
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        print("🛑 Бот остановлен вручную (Ctrl+C)")
-"""
+    asyncio.run(main())
 
