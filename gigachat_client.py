@@ -98,6 +98,12 @@ def send_prompt_to_gigachat(user_id: str, prompt: str, bot_state, use_translatio
         response = requests.post(api_url, headers=headers, json=payload, timeout=service_config.get("timeout", 100))
         response.raise_for_status()
         data = response.json()
+        
+        # Check if the response contains a finish_reason
+        finish_reason = data.get("choices", [{}])[0].get("finish_reason", None)
+        if finish_reason and bot_state.debug_mode:
+            print(f"⚠️ Sber Gigachat завершил запрос по причине: {finish_reason}\n")
+    
         result = data["choices"][0]["message"]["content"].strip()
 
         if bot_state.debug_mode:

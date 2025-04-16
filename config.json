@@ -109,5 +109,5 @@
   },
   "credentials_path": "secrets/credentials.json",
   "debug_mode": true,
-  "default_service": "ollama"
+  "default_service": "ollama1"
 }

@@ -3,6 +3,7 @@
 
 import json
 import requests
+from config import OLLAMA_KEEP_ALIVE
 
 def send_prompt_to_ollama(user_id: str, prompt: str, bot_state, use_translation: bool = False,
                            translate_func=None, reverse_translate_func=None) -> str:
@@ -55,7 +56,11 @@ def send_prompt_to_ollama(user_id: str, prompt: str, bot_state, use_translation:
         print("="*60)
 
     try:
-        response = requests.post(api_url, json=payload, timeout=service_config.get("timeout", 90))
+        response = requests.post(
+                                api_url,
+                                json=payload,
+                                timeout=service_config.get("timeout", 90)
+        )
         response.raise_for_status()
         data = response.json()
         result = data.get("response", "").strip()

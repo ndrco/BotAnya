@@ -4,7 +4,7 @@
 import json
 import os
 import tiktoken
-from telegram import Update, BotCommand, InlineKeyboardButton,\
+from telegram import Update, BotCommand, InlineKeyboardButton,Message,\
                          InlineKeyboardMarkup, CallbackQuery, ForceReply
 from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, \
                          ContextTypes, filters
@@ -27,6 +27,7 @@ def register_handlers(app):
     app.add_handler(CommandHandler("whoami", whoami_command))
     app.add_handler(CommandHandler("retry", retry_command))
     app.add_handler(CommandHandler("edit", edit_command))
+    app.add_handler(CommandHandler("continue", continue_command))
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("lang", lang_command))
@@ -35,8 +36,11 @@ def register_handlers(app):
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, handle_force_reply))
     
+    app.add_handler(CallbackQueryHandler(continue_reply_handler, pattern="^continue_reply$"))
+    app.add_handler(CallbackQueryHandler(retry_callback_handler, pattern="^cb_retry$"))
+    app.add_handler(CallbackQueryHandler(edit_callback_handler, pattern="^cb_edit$"))
     app.add_handler(CallbackQueryHandler(scenario_button, pattern="^scenario:"))
-    app.add_handler(CallbackQueryHandler(service_button, pattern=r"^service:"))    
+    app.add_handler(CallbackQueryHandler(service_button, pattern=r"^service:"))
     app.add_handler(CallbackQueryHandler(role_button))
 
 
@@ -49,8 +53,9 @@ def get_bot_commands():
         BotCommand("role", "Выбрать персонажа"),
         BotCommand("scene", "Сгенерировать сюжетную сцену"),
         BotCommand("whoami", "Показать кто я"),
-        BotCommand("retry", "Изменить последнее сообщение бота"),
-        BotCommand("edit", "Изменить свое последнее сообщение"),        
+        BotCommand("retry", "Изменить сообщение бота"),
+        BotCommand("continue", "Продолжить cooбщение бота"),
+        BotCommand("edit", "Изменить свое последнее сообщение"),
         BotCommand("history", "Показать историю"),
         BotCommand("reset", "Сбросить историю"),
         BotCommand("service", "Выбрать думатель"),
@@ -61,6 +66,37 @@ def get_bot_commands():
 
 
 
+# Function to send a message with MarkdownV2 formatting
+async def safe_send_markdown(update, text: str, original_text: str = None, buttons: list = None) -> Message:
+    """
+        Safely sends a message with MarkdownV2. If formatting fails, retry without it.
+
+        :param update: Telegram update object
+        :param text: text prepared for MarkdownV2
+        :param original_text: unformatted original, if Markdown breaks
+        :param buttons: list of buttons (list[list[InlineKeyboardButton]]) or None
+        :return: Message object
+    """
+    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+    effective_message = update.effective_message
+    
+    if not text.strip():
+        text = "⚠️ Ошибка: пустой ответ от модели. Попробуй ещё раз."
+    
+    try:
+        return await effective_message.reply_text(
+            text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
+    except Exception as e:
+        if bot_state.debug_mode:
+            print(f"⚠️ Ошибка форматирования MarkdownV2: {e}")
+            print("📝 Повторная отправка без форматирования.")
+        return await effective_message.reply_text(
+            original_text or text, reply_markup=reply_markup
+        )
+
+
+
 
 # /service handler
 async def service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -68,7 +104,7 @@ async def service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     services = bot_state.config.get("services", {})
     user_role = bot_state.get_user_role(user_id) or {}
-    active_service = user_role.get("service", "ollama")
+    active_service = user_role.get("service")
 
     buttons = [
         [InlineKeyboardButton(f"{'✅ ' if key == active_service else ''}{services[key].get('name', key)}", callback_data=f"service:{key}")]
@@ -188,9 +224,6 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_role = world.get("user_role", "неизвестная роль")
     world_prompt = world.get("system_prompt", "")
 
-    role_entry = bot_state.get_user_role(user_id)
-    service = role_entry.get("service", bot_state.config.get("default_service", "ollama"))
-
     # Prompt building
     base_prompt = build_scene_prompt(world_prompt, char, user_role)
     service_config = bot_state.get_user_service_config(user_id)
@@ -209,7 +242,6 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_func = send_prompt_to_gigachat
         case _:
             raise ValueError(f"❌ Неизвестный тип сервиса: {service_type}")
-
 
     try:
         # Sending prompt to Ollama API
@@ -230,11 +262,18 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = bot_state.get_user_history(user_id, scenario_file)
     narrator_entry = f"Narrator: {reply_scene}"
     user_data["history"].append(narrator_entry)
-    bot_state.update_user_history(user_id, scenario_file, user_data["history"])
-    save_history()
     
     formatted_scene = safe_markdown_v2(reply_scene)
-    await update.message.reply_text(formatted_scene, parse_mode="MarkdownV2")
+
+    buttons = [[
+        InlineKeyboardButton("🔁 Повторить", callback_data="cb_retry"),
+        InlineKeyboardButton("⏭ Продолжить", callback_data="continue_reply"),
+    ]]
+    
+    bot_msg = await safe_send_markdown(update, formatted_scene, reply_scene, buttons)
+
+    bot_state.update_user_history(user_id, scenario_file, user_data["history"], last_bot_id=bot_msg.message_id)
+    save_history()
 
 
 
@@ -287,13 +326,13 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     char, world, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
     if error:
-        await update.message.reply_text(error, parse_mode="Markdown")
+        await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
 
     user_data = bot_state.get_user_history(user_id, scenario_file)
 
     if not user_data or "last_input" not in user_data:
-        await update.message.reply_text("❗ Нет предыдущего сообщения для повтора.")
+        await update.effective_message.reply_text("❗ Нет предыдущего сообщения для повтора.")
         return
 
     char_name = char["name"]
@@ -305,12 +344,19 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if bot_state.debug_mode:
             print(f"🔁 История пользователя {user_id} обрезана на 2 сообщения (retry)")
     else:
-        await update.message.reply_text("⚠️ Нельзя перегенерировать: последние сообщения не соответствуют шаблону.")
+        await update.effective_message.reply_text("⚠️ Нельзя перегенерировать: последние сообщения не соответствуют шаблону.")
         return
 
-    await update.message.reply_text("🔁 Перегенерирую последний ответ...")
+    await update.effective_message.reply_text("🔁 Перегенерирую последний ответ...")
     await handle_message(update, context, override_input=user_data["last_input"])
 
+
+
+
+# /continue handler
+async def continue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # This function is called when the user clicks the "Continue" button
+    await handle_message(update, context, override_input="Продолжай")
 
 
 
@@ -322,13 +368,13 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     char, world, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
     if error:
-        await update.message.reply_text(error, parse_mode="Markdown")
+        await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
 
     user_data = bot_state.get_user_history(user_id, scenario_file)
 
     if not user_data or "last_input" not in user_data:
-        await update.message.reply_text("❗ Нет сообщения для редактирования.")
+        await update.effective_message.reply_text("❗ Нет сообщения для редактирования.")
         return
 
     char_name = char["name"]
@@ -340,14 +386,13 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if bot_state.debug_mode:
             print(f"✂️ История пользователя {user_id} обрезана на 2 сообщения (edit)")
     else:
-        await update.message.reply_text("⚠️ Нельзя отредактировать последнее сообщение: структура не совпадает.")
+        await update.effective_message.reply_text("⚠️ Нельзя отредактировать последнее сообщение: структура не совпадает.")
         return
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"📝 Отредактируй своё последнее сообщение:\n\n{user_data['last_input']}",
         reply_markup=ForceReply(selective=True)
     )
-
 
 
 
@@ -406,8 +451,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for chunk in chunks:
         formatted_chunk = safe_markdown_v2(chunk)
-        await update.message.reply_text(f"📝 История:\n\n{formatted_chunk}",
-                                        parse_mode="MarkdownV2")
+        await safe_send_markdown(update, formatted_chunk, chunk)
 
 
 
@@ -449,7 +493,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_state.update_user_history(user_id, scenario_file, user_data["history"])
             save_history()
             formatted_intro = safe_markdown_v2(intro_scene)
-            await update.message.reply_text(formatted_intro, parse_mode="MarkdownV2")
+            await safe_send_markdown(update, formatted_intro, intro_scene)
     except Exception as e:
         if bot_state.debug_mode:
             print(f"⚠️ Не удалось загрузить intro_scene после reset: {e}")
@@ -527,15 +571,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /scene — сгенерировать атмосферную сцену ✨\n"
         "• /whoami — показать, кто ты в этом мире\n"
         "• /retry — перегенерировать последнее сообщение бота\n"
+        "• /continue — продолжить последнее cooбщение бота\n"        
         "• /edit — отредактировать свое последнее сообщение\n"
         "• /history — показать историю общения в этом мире\n"
         "• /reset — сбросить историю\n"
         "• /help — показать это сообщение\n\n"
         "• /service — сменить думатель\n"
         f"Сейчас включен думатель: *{service_name}*.\n\n"
-        "• /lang — сменить язык думателя бота (EN/RUS).\
-        *EN* -бот думает по английски, говорит по русски. *RU* - все по русски.\n"
+        "• /lang — сменить язык думателя бота (EN/RUS). "
+        "*EN* - бот думает по английски, говорит по русски. *RU* - все по русски.\n"
         f"Сейчас включен язык: *{lang}*.\n\n"
+        "Также в сообщениях бота есть кнопки быстрого вызова команд:\n"
+        "🔁 Повторить — /retry,\n"
+        "⏭ Продолжить — /continue,\n"
+        "✂️ Изменить — /edit.\n\n"
         "📌 Выбери сценарий и роль, а затем пиши любое сообщение — я буду отвечать в её стиле!\n\n"
         "*💡 Как писать действия:*\n"
         "Ты можешь не только говорить, но и описывать свои действия, или дать указания модели.\n"
@@ -589,7 +638,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     base_prompt = f"{world_prompt}\nПользователь — {user_role_description}.\n{char['prompt']}\n"
 
     service_config = bot_state.get_user_service_config(user_id)
-
+    if service_config is None:
+        await update.effective_message.reply_text("⚠️ Ошибка: выбранный думатель не найден. Попробуй /service.")
+        return
     encoding = tiktoken.get_encoding(service_config.get("tiktoken_encoding", "gpt2"))
     tokens_used = len(encoding.encode(base_prompt))
 
@@ -655,8 +706,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             case _:
                 raise ValueError(f"❌ Неизвестный тип сервиса: {service_type}")
       
-        thinking_message = await update.message.reply_text(f"{emoji} {char['name']} думает... 🤔")
-                
+        thinking_message = await update.effective_message.reply_text(f"{emoji} {char['name']} думает... 🤔")
+
         reply = send_func(
             user_id,
             prompt,
@@ -704,9 +755,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         emoji = char.get("emoji", "")
         reply = f"{emoji} {reply}".strip()
 
-
     formatted_reply = safe_markdown_v2(reply)
-    bot_msg = await update.message.reply_text(formatted_reply, parse_mode="MarkdownV2")
+    buttons = [[
+        InlineKeyboardButton("🔁 Повторить", callback_data="cb_retry"),
+        InlineKeyboardButton("⏭ Продолжить", callback_data="continue_reply"),
+        InlineKeyboardButton("✂️ Изменить", callback_data="cb_edit")
+    ]]
+    bot_msg = await safe_send_markdown(update, formatted_reply, reply, buttons)
+
     bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_bot_id=bot_msg.message_id)
 
 
@@ -788,7 +844,7 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_state.update_user_history(user_id, selected_file, user_data["history"])
             save_history()
             formatted_intro = safe_markdown_v2(intro_scene)
-            await query.message.reply_text(formatted_intro, parse_mode="MarkdownV2")
+            await safe_send_markdown(update, formatted_intro, intro_scene)
         
         # If history is not empty — show last two messages
         elif user_data["history"]:
@@ -814,8 +870,9 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     if not found:
                         formatted = line
-
-                await query.message.reply_text(safe_markdown_v2(formatted), parse_mode="MarkdownV2")
+                
+                markdown_formatted = safe_markdown_v2(formatted)
+                await safe_send_markdown(update, markdown_formatted, formatted)
 
     except Exception as e:
         await query.edit_message_text(f"⚠️ Ошибка при загрузке сценария: {e}")
@@ -902,3 +959,31 @@ async def service_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(f"🧠 Теперь ты используешь думатель: *{service_name}* ✨", parse_mode="Markdown")
 
+
+
+
+# continue_reply handler
+async def continue_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # /handle_message is called from the callback
+    await handle_message(update, context, override_input="Продолжай")
+
+
+
+
+# retry_callback handler
+async def retry_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # /retry command is called from the callback
+    await retry_command(update, context)
+    
+
+
+# edit_callback handler
+async def edit_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query: CallbackQuery = update.callback_query
+    await query.answer()
+    # /edit_command is called from the callback
+    await edit_command(update, context)

@@ -10,18 +10,37 @@ from typing import List
 
 # Markdown shielding
 def safe_markdown_v2(text: str) -> str:
-    # Temporary replacement for bold and italic markers
+    if not text:
+        return ""
+
+    # 1. Save bold/italic formatting
     text = re.sub(r'\*\*(.+?)\*\*', r'%%BOLD%%\1%%BOLD%%', text)
     text = re.sub(r'\*(.+?)\*', r'%%ITALIC%%\1%%ITALIC%%', text)
 
-    # Shielding other characters
-    escaped_text = escape_markdown(text, version=2)
+    # 2. Escape Markdown symbols
+    text = escape_markdown(text, version=2)
 
-    # Returning to original formatting
-    escaped_text = escaped_text.replace('%%BOLD%%', '*')
-    escaped_text = escaped_text.replace('%%ITALIC%%', '_')
+    # 3. Restore bold/italic formatting
+    text = text.replace('%%BOLD%%', '*')
+    text = text.replace('%%ITALIC%%', '_')
 
-    return escaped_text
+    # 4. Remove last symbol if odd count
+    def remove_last_if_odd(symbol: str, raw: str) -> str:
+        count = raw.count(symbol)
+        if count % 2 != 0:
+            last_index = raw.rfind(symbol)
+            raw = raw[:last_index] + raw[last_index + 1:]
+        return raw
+
+    for sym in ['*', '_', '~']:
+        text = remove_last_if_odd(sym, text)
+
+    if text.count('[') != text.count(']'):
+        text = re.sub(r'\[.*$', '', text)
+    if text.count('(') != text.count(')'):
+        text = re.sub(r'\(.*$', '', text)
+
+    return text.strip()
 
 
 

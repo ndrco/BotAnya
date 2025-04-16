@@ -91,6 +91,8 @@ class BotState:
         user_entry = self.user_roles.get(user_id, {})
         service_key = user_entry.get("service", self.config.get("default_service"))
         services = self.config.get("services", {})
+        if not services and self.debug_mode:
+            print(f"⚠️ [DEBUG] Сервис '{service_key}' не найден в config.json!")
         return services.get(service_key)
     
 

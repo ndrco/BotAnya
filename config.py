@@ -13,5 +13,9 @@ ROLES_FILE = os.path.join(BASE_DIR, "user_roles.json")
 HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
 LOG_DIR = os.path.join(BASE_DIR, "chat_logs")
 
-# Maximum length of telemgram messages
+# Maximum length of telegram messages
 MAX_LENGTH = 4096
+
+# Time of keep-alive for Ollama models
+# controls how long the model will stay loaded into memory following the request
+OLLAMA_KEEP_ALIVE = "1"  # seconds
