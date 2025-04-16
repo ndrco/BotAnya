@@ -3,6 +3,7 @@
 
 import json
 import os
+import asyncio
 from config import (CONFIG_FILE, CREDENTIALS_FILE, SCENARIOS_DIR, ROLES_FILE, HISTORY_FILE, LOG_DIR)
 from datetime import datetime
 
@@ -18,6 +19,7 @@ class BotState:
         self.credentials = {}
         self.debug_mode = True
         self.bot_token = ""
+        self.user_locks = {}
 
 
 
@@ -94,6 +96,17 @@ class BotState:
         if not services and self.debug_mode:
             print(f"⚠️ [DEBUG] Сервис '{service_key}' не найден в config.json!")
         return services.get(service_key)
+    
+
+    # Function to get block for user
+    def get_user_lock(self, user_id: str) -> asyncio.Lock:
+        """
+        Возвращает объект блокировки для конкретного user_id.
+        Если нет — создаёт.
+        """
+        if user_id not in self.user_locks:
+            self.user_locks[user_id] = asyncio.Lock()
+        return self.user_locks[user_id]
     
 
 

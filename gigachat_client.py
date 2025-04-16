@@ -3,10 +3,16 @@
 
 import json
 import uuid
-import requests
+import httpx
+import asyncio
+from config import GIGACHAT_SEMAPHORE
 
-def send_prompt_to_gigachat(user_id: str, prompt: str, bot_state, use_translation: bool = False,
-                           translate_func=None, reverse_translate_func=None) -> str:
+gigachat_semaphore = asyncio.Semaphore(GIGACHAT_SEMAPHORE)
+gigachat_semaphore_lock = asyncio.Lock()
+gigachat_waiting = []
+
+async def send_prompt_to_gigachat(user_id: str, prompt: str, bot_state, use_translation: bool = False,
+                           translate_func=None, reverse_translate_func=None, get_position_only: bool = False) -> str:
     """
     Отправляет prompt к API GigaChat и возвращает ответ модели.
 
@@ -17,7 +23,8 @@ def send_prompt_to_gigachat(user_id: str, prompt: str, bot_state, use_translatio
     :param use_translation: Флаг, если True, будет выполнять перевод prompt перед отправкой и ответа после.
     :param translate_func: Функция для перевода prompt на английский.
     :param reverse_translate_func: Функция для обратного перевода ответа.
-    :return: Строка с текстовым ответом от модели GigaChat.
+    :param get_position_only: Флаг, если True, возвращает только позицию в очереди.
+    :return: Строка с текстовым ответом от модели GigaChat, позиция в очереди (если используется семафор).
     """
     
     # Getting user service configuration
@@ -25,7 +32,7 @@ def send_prompt_to_gigachat(user_id: str, prompt: str, bot_state, use_translatio
     if not service_config or service_config.get("type") != "gigachat":
         if bot_state.debug_mode:
             print("⚠️ GigaChat не выбран или отсутствует конфигурация.")
-        return ""
+        return "", None
 
     # Getting user service key and auth key
     service_key = bot_state.get_user_role(user_id).get("service", bot_state.config.get("default_service"))
@@ -34,7 +41,7 @@ def send_prompt_to_gigachat(user_id: str, prompt: str, bot_state, use_translatio
     if not auth_key:
         if bot_state.debug_mode:
             print("❌ Не найден auth_key для GigaChat.")
-        return ""
+        return "", None
 
     # # Token for GigaChat API authorization
     access_token = None
@@ -48,19 +55,25 @@ def send_prompt_to_gigachat(user_id: str, prompt: str, bot_state, use_translatio
         oauth_data = {'scope': service_config.get("scope", "GIGACHAT_API_PERS")}
         oauth_url = service_config.get("auth_url", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
 
-        response = requests.post(oauth_url, headers=oauth_headers, data=oauth_data, timeout=service_config.get("timeout", 100))
-        response.raise_for_status()
-        access_token = response.json().get("access_token")
+        async with gigachat_semaphore:
+            async with httpx.AsyncClient(timeout=service_config.get("timeout", 90)) as client:
+                response = await client.post(
+                    oauth_url,
+                    headers=oauth_headers,
+                    data=oauth_data,
+                ) 
+                response.raise_for_status()
+                access_token = response.json().get("access_token")
 
     except Exception as e:
         if bot_state.debug_mode:
             print(f"❌ Ошибка авторизации в GigaChat: {e}")
-        return ""
+        return "", None
 
     if not access_token:
         if bot_state.debug_mode:
             print("❌ Не получен токен доступа для GigaChat.")
-        return ""
+        return "", None
 
     # Translate prompt if use_translation is True
     if use_translation and translate_func:
@@ -95,33 +108,53 @@ def send_prompt_to_gigachat(user_id: str, prompt: str, bot_state, use_translatio
     api_url = service_config.get("url", "https://gigachat.devices.sberbank.ru/api/v1/chat/completions")
 
     try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=service_config.get("timeout", 100))
-        response.raise_for_status()
-        data = response.json()
-        
-        # Check if the response contains a finish_reason
-        finish_reason = data.get("choices", [{}])[0].get("finish_reason", None)
-        if finish_reason and bot_state.debug_mode:
-            print(f"⚠️ Sber Gigachat завершил запрос по причине: {finish_reason}\n")
-    
-        result = data["choices"][0]["message"]["content"].strip()
+        async with gigachat_semaphore_lock:
+            gigachat_waiting.append(user_id)
+            my_position = gigachat_waiting.index(user_id) + 1
 
-        if bot_state.debug_mode:
-            print("📜 Ответ GigaChat:\n" + result)
-            print("=" * 60)
+        if get_position_only:
+            async with gigachat_semaphore_lock:
+                if user_id in gigachat_waiting:
+                    gigachat_waiting.remove(user_id)
+            return "", my_position    
 
-        # Translate response if use_translation is True
-        if use_translation and reverse_translate_func:
-            result = reverse_translate_func(result)
-            if bot_state.debug_mode:
-                print("🈯 Перевод:")
-                print(result)
-                print("=" * 60)
+        async with gigachat_semaphore:    
+            async with httpx.AsyncClient(timeout=service_config.get("timeout", 90)) as client:
+                response = await client.post(
+                    api_url,
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+            
+                # Check if the response contains a finish_reason
+                finish_reason = data.get("choices", [{}])[0].get("finish_reason", None)
+                if finish_reason and bot_state.debug_mode:
+                    print(f"⚠️ Sber Gigachat завершил запрос по причине: {finish_reason}\n")
+            
+                result = data["choices"][0]["message"]["content"].strip()
 
-        return result
+                if bot_state.debug_mode:
+                    print("📜 Ответ GigaChat:\n" + result)
+                    print("=" * 60)
+
+                # Translate response if use_translation is True
+                if use_translation and reverse_translate_func:
+                    result = reverse_translate_func(result)
+                    if bot_state.debug_mode:
+                        print("🈯 Перевод:")
+                        print(result)
+                        print("=" * 60)
+
+            async with gigachat_semaphore_lock:
+                if user_id in gigachat_waiting:
+                    gigachat_waiting.remove(user_id)
+
+            return result, my_position
 
     except Exception as e:
         if bot_state.debug_mode:
             print(f"❌ Ошибка при запросе GigaChat: {e}")
-        return ""
+        return "", None
 

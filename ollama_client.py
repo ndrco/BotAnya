@@ -2,11 +2,17 @@
 # This file is part of the BotAnya Telegram Bot project.
 
 import json
-import requests
-from config import OLLAMA_KEEP_ALIVE
+import httpx
+import asyncio
+from httpx import RemoteProtocolError, ReadTimeout
+from config import OLLAMA_KEEP_ALIVE, OLLAMA_SEMAPHORE
 
-def send_prompt_to_ollama(user_id: str, prompt: str, bot_state, use_translation: bool = False,
-                           translate_func=None, reverse_translate_func=None) -> str:
+ollama_semaphore = asyncio.Semaphore(OLLAMA_SEMAPHORE)
+ollama_semaphore_lock = asyncio.Lock()
+ollama_waiting = []
+
+async def send_prompt_to_ollama(user_id: str, prompt: str, bot_state, use_translation: bool = False,
+                           translate_func=None, reverse_translate_func=None, get_position_only: bool = False) -> str:
     """
     Отправляет prompt на сервер Ollama и возвращает ответ.
 
@@ -15,7 +21,8 @@ def send_prompt_to_ollama(user_id: str, prompt: str, bot_state, use_translation:
     :param use_translation: Флаг, если True, будет выполнять перевод prompt перед отправкой и ответа после.
     :param translate_func: Функция для перевода prompt на английский.
     :param reverse_translate_func: Функция для обратного перевода ответа.
-    :return: Строка с ответом от модели.
+    :param get_position_only: Флаг, если True, возвращает только позицию в очереди.
+    :return: Строка с ответом от модели, позиция в очереди (если используется семафор).
     """
     
     # Getting user service configuration
@@ -23,7 +30,7 @@ def send_prompt_to_ollama(user_id: str, prompt: str, bot_state, use_translation:
     if not service_config or service_config.get("type") != "ollama":
         if bot_state.debug_mode:
             print("⚠️ Ollama не выбран или конфигурация отсутствует.")
-        return ""    
+        return "", None    
 
 
     api_url = service_config.get("url", "http://localhost:11434/api/generate")
@@ -57,28 +64,48 @@ def send_prompt_to_ollama(user_id: str, prompt: str, bot_state, use_translation:
         print("="*60)
 
     try:
-        response = requests.post(
-                                api_url,
-                                json=payload,
-                                timeout=service_config.get("timeout", 90)
-        )
-        response.raise_for_status()
-        data = response.json()
-        result = data.get("response", "").strip()
+        async with ollama_semaphore_lock:
+            ollama_waiting.append(user_id)
+            my_position = ollama_waiting.index(user_id) + 1
 
+        if get_position_only:
+            async with ollama_semaphore_lock:
+                if user_id in ollama_waiting:
+                    ollama_waiting.remove(user_id)
+            return "", my_position    
+
+        async with ollama_semaphore:
+            async with httpx.AsyncClient(timeout=service_config.get("timeout", 90)) as client:
+                response = await client.post(
+                    api_url,
+                    json=payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+                result = data.get("response", "").strip()
+
+                if bot_state.debug_mode:
+                    print("📜 Ответ Ollama:\n" + result)
+                    print("="*60)
+
+                if use_translation and reverse_translate_func:
+                    result = reverse_translate_func(result)
+                    if bot_state.debug_mode:
+                        print("🈯 Перевод:\n" + result)
+                        print("="*60)
+
+        async with ollama_semaphore_lock:
+            if user_id in ollama_waiting:
+                ollama_waiting.remove(user_id)
+
+        return result, my_position
+
+    except (RemoteProtocolError, ReadTimeout) as e:
         if bot_state.debug_mode:
-            print("📜 Ответ Ollama:\n" + result)
-            print("="*60)
-
-        if use_translation and reverse_translate_func:
-            result = reverse_translate_func(result)
-            if bot_state.debug_mode:
-                print("🈯 Перевод:\n" + result)
-                print("="*60)
-
-        return result
+            print(f"⚠️ Сетевой сбой при запросе Ollama: {e}")
+        return "⚠️ Думатель внезапно замолчал. Попробуй ещё раз 🫤", None
 
     except Exception as e:
         if bot_state.debug_mode:
             print(f"❌ Ошибка при запросе Ollama: {e}")
-        return ""
+        return "⚠️ Ошибка запроса к модели. Попробуй позже.", None

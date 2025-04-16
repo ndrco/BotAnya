@@ -19,3 +19,8 @@ MAX_LENGTH = 4096
 # Time of keep-alive for Ollama models
 # controls how long the model will stay loaded into memory following the request
 OLLAMA_KEEP_ALIVE = 1200  # seconds
+# max number of concurrent requests to Ollama API
+OLLAMA_SEMAPHORE = 5  
+
+# max number of concurrent requests to GigaChat API
+GIGACHAT_SEMAPHORE = 1 

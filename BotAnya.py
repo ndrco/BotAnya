@@ -26,7 +26,7 @@ async def main():
     load_roles()
     load_history()
 
-    app = ApplicationBuilder().token(bot_state.bot_token).build()
+    app = ApplicationBuilder().concurrent_updates(True).token(bot_state.bot_token).build()
 
     # Handlers
     # Registering handlers for different commands and messages

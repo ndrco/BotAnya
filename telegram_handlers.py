@@ -206,7 +206,7 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         for key, char in characters.items()
     ]
-    
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🎭 Выбери персонажа:", reply_markup=reply_markup)
 
@@ -238,8 +238,6 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         prompt = base_prompt
 
-    thinking_message = await update.message.reply_text("🎬 Генерирую сцену... подожди немного ☕")
-
     service_type = service_config.get("type")
     match service_type:
         case "ollama":
@@ -249,9 +247,27 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         case _:
             raise ValueError(f"❌ Неизвестный тип сервиса: {service_type}")
 
+    _, my_position = await send_func(
+        user_id,
+        prompt,
+        bot_state,
+        use_translation=bot_state.get_user_role(user_id).get("use_translation", False),
+        translate_func = translate_prompt_to_english,
+        reverse_translate_func = translate_prompt_to_russian,
+        get_position_only = True
+    )
+
+    if my_position > 1:
+        await update.effective_message.reply_text(
+            f"⏳ Сейчас думатель занят другими... Ты — *{my_position}-й* в очереди.",
+            parse_mode="Markdown"
+        )
+
+    thinking_message = await update.message.reply_text("🎬 Генерирую сцену... подожди немного ☕")
+
     try:
-        # Sending prompt to Ollama API
-        reply_scene = send_func(
+        # Sending prompt
+        reply_scene, _ = await send_func(
             user_id,
             prompt,
             bot_state,
@@ -265,21 +281,24 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await thinking_message.delete()
 
     # History management
-    user_data = bot_state.get_user_history(user_id, scenario_file)
-    narrator_entry = f"Narrator: {reply_scene}"
-    user_data["history"].append(narrator_entry)
-    
-    formatted_scene = safe_markdown_v2(reply_scene)
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
 
-    buttons = [[
-        InlineKeyboardButton("🔁 Повторить", callback_data="cb_retry"),
-        InlineKeyboardButton("⏭ Продолжить", callback_data="continue_reply"),
-    ]]
-    
-    bot_msg = await safe_send_markdown(update, formatted_scene, reply_scene, buttons)
+        user_data = bot_state.get_user_history(user_id, scenario_file)
+        narrator_entry = f"Narrator: {reply_scene}"
+        user_data["history"].append(narrator_entry)
+        
+        formatted_scene = safe_markdown_v2(reply_scene)
 
-    bot_state.update_user_history(user_id, scenario_file, user_data["history"], last_bot_id=bot_msg.message_id)
-    save_history()
+        buttons = [[
+            InlineKeyboardButton("🔁 Повторить", callback_data="cb_retry"),
+            InlineKeyboardButton("⏭ Продолжить", callback_data="continue_reply"),
+        ]]
+        
+        bot_msg = await safe_send_markdown(update, formatted_scene, reply_scene, buttons)
+
+        bot_state.update_user_history(user_id, scenario_file, user_data["history"], last_bot_id=bot_msg.message_id)
+        save_history()
 
 
 
@@ -334,24 +353,26 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if error:
         await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
+    
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
+        user_data = bot_state.get_user_history(user_id, scenario_file)
 
-    user_data = bot_state.get_user_history(user_id, scenario_file)
+        if not user_data or "last_input" not in user_data:
+            await update.effective_message.reply_text("❗ Нет предыдущего сообщения для повтора.")
+            return
 
-    if not user_data or "last_input" not in user_data:
-        await update.effective_message.reply_text("❗ Нет предыдущего сообщения для повтора.")
-        return
+        char_name = char["name"]
 
-    char_name = char["name"]
-
-    if bot_state.is_valid_last_exchange(user_id, scenario_file, char_name, world):
-        history_cut = user_data["history"][:-2]
-        bot_state.update_user_history(user_id, scenario_file, history_cut, last_input=user_data["last_input"])
-        save_history()
-        if bot_state.debug_mode:
-            print(f"🔁 История пользователя {user_id} обрезана на 2 сообщения (retry)")
-    else:
-        await update.effective_message.reply_text("⚠️ Нельзя перегенерировать: последние сообщения не соответствуют шаблону.")
-        return
+        if bot_state.is_valid_last_exchange(user_id, scenario_file, char_name, world):
+            history_cut = user_data["history"][:-2]
+            bot_state.update_user_history(user_id, scenario_file, history_cut, last_input=user_data["last_input"])
+            save_history()
+            if bot_state.debug_mode:
+                print(f"🔁 История пользователя {user_id} обрезана на 2 сообщения (retry)")
+        else:
+            await update.effective_message.reply_text("⚠️ Нельзя перегенерировать: последние сообщения не соответствуют шаблону.")
+            return
 
     await update.effective_message.reply_text("🔁 Перегенерирую последний ответ...")
     await handle_message(update, context, override_input=user_data["last_input"])
@@ -377,23 +398,26 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
 
-    user_data = bot_state.get_user_history(user_id, scenario_file)
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
 
-    if not user_data or "last_input" not in user_data:
-        await update.effective_message.reply_text("❗ Нет сообщения для редактирования.")
-        return
+        user_data = bot_state.get_user_history(user_id, scenario_file)
 
-    char_name = char["name"]
+        if not user_data or "last_input" not in user_data:
+            await update.effective_message.reply_text("❗ Нет сообщения для редактирования.")
+            return
 
-    if bot_state.is_valid_last_exchange(user_id, scenario_file, char_name, world):
-        history_cut = user_data["history"][:-2]
-        bot_state.update_user_history(user_id, scenario_file, history_cut, last_input=user_data["last_input"])
-        save_history()
-        if bot_state.debug_mode:
-            print(f"✂️ История пользователя {user_id} обрезана на 2 сообщения (edit)")
-    else:
-        await update.effective_message.reply_text("⚠️ Нельзя отредактировать последнее сообщение: структура не совпадает.")
-        return
+        char_name = char["name"]
+
+        if bot_state.is_valid_last_exchange(user_id, scenario_file, char_name, world):
+            history_cut = user_data["history"][:-2]
+            bot_state.update_user_history(user_id, scenario_file, history_cut, last_input=user_data["last_input"])
+            save_history()
+            if bot_state.debug_mode:
+                print(f"✂️ История пользователя {user_id} обрезана на 2 сообщения (edit)")
+        else:
+            await update.effective_message.reply_text("⚠️ Нельзя отредактировать последнее сообщение: структура не совпадает.")
+            return
 
     await update.effective_message.reply_text(
         f"📝 Отредактируй своё последнее сообщение:\n\n{user_data['last_input']}",
@@ -478,33 +502,39 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Reset history for the user in the current scenario
-    bot_state.user_history.setdefault(user_id, {})[scenario_file] = {
-        "history": [],
-        "last_input": "",
-        "last_bot_id": None
-    }
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
+
+        bot_state.user_history.setdefault(user_id, {})[scenario_file] = {
+            "history": [],
+            "last_input": "",
+            "last_bot_id": None
+        }
 
     await update.message.reply_text(
         "🔁 История очищена! Ты можешь начать диалог заново с текущим персонажем ✨\n\n"
     )
 
     # If intro_scene exists, load it and send to the user
-    try:
-        _, world = load_characters(os.path.join(SCENARIOS_DIR, scenario_file))
-        intro_scene = world.get("intro_scene", "")
-        if intro_scene:
-            user_data = bot_state.get_user_history(user_id, scenario_file)
-            narrator_entry = f"Narrator: {intro_scene}"
-            user_data["history"].append(narrator_entry)
-            bot_state.update_user_history(user_id, scenario_file, user_data["history"])
-            save_history()
-            formatted_intro = safe_markdown_v2(intro_scene)
-            await safe_send_markdown(update, formatted_intro, intro_scene)
-    except Exception as e:
-        if bot_state.debug_mode:
-            print(f"⚠️ Не удалось загрузить intro_scene после reset: {e}")
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
 
-    save_history()
+        try:
+            _, world = load_characters(os.path.join(SCENARIOS_DIR, scenario_file))
+            intro_scene = world.get("intro_scene", "")
+            if intro_scene:
+                user_data = bot_state.get_user_history(user_id, scenario_file)
+                narrator_entry = f"Narrator: {intro_scene}"
+                user_data["history"].append(narrator_entry)
+                bot_state.update_user_history(user_id, scenario_file, user_data["history"])
+                save_history()
+                formatted_intro = safe_markdown_v2(intro_scene)
+                await safe_send_markdown(update, formatted_intro, intro_scene)
+        except Exception as e:
+            if bot_state.debug_mode:
+                print(f"⚠️ Не удалось загрузить intro_scene после reset: {e}")
+
+        save_history()
 
     await update.message.reply_text(
         "💡 Хочешь начать с сюжетной сцены? Попробуй /scene 🎬"
@@ -522,18 +552,21 @@ async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(error)
         return
 
-    role_entry = bot_state.get_user_role(user_id)
-    current_value = role_entry.get("use_translation", False)
-    new_value = not current_value
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
 
-    bot_state.set_user_role(
-        user_id,
-        role=role_entry.get("role"),
-        scenario_file=scenario_file,
-        use_translation=new_value
-    )
+        role_entry = bot_state.get_user_role(user_id)
+        current_value = role_entry.get("use_translation", False)
+        new_value = not current_value
 
-    save_roles()
+        bot_state.set_user_role(
+            user_id,
+            role=role_entry.get("role"),
+            scenario_file=scenario_file,
+            use_translation=new_value
+        )
+
+        save_roles()
 
     status = "включён 🌍" if new_value else "выключен 🔇"
     await update.message.reply_text(f"Перевод {status}.\nТеперь модель будет {'думать на английском и отвечать по-русски' if new_value else 'работать напрямую на русском языке'} ☺️")
@@ -651,35 +684,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     tokens_used = len(encoding.encode(base_prompt))
 
     # Getting user history and trimming it if necessary
-    user_data = bot_state.get_user_history(user_id, scenario_file)
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
+        user_data = bot_state.get_user_history(user_id, scenario_file)
 
-    history = user_data["history"]
-    
-    max_tokens = service_config.get("max_tokens", 7000)
-    trimmed_history, tokens_used = smart_trim_history(history, encoding,
-                                                      max_tokens - tokens_used)
+        history = user_data["history"]
+        
+        max_tokens = service_config.get("max_tokens", 7000)
+        trimmed_history, tokens_used = smart_trim_history(history, encoding,
+                                                        max_tokens - tokens_used)
 
-    user_emoji = world.get("user_emoji", "🧑")
-    user_message = f"{user_emoji}: {user_input}"
-    user_message_tokens = len(encoding.encode(user_message + "\n"))
+        user_emoji = world.get("user_emoji", "🧑")
+        user_message = f"{user_emoji}: {user_input}"
+        user_message_tokens = len(encoding.encode(user_message + "\n"))
 
-    # Adding user message to trimmed history if it fits
-    if tokens_used + user_message_tokens <= max_tokens:
-        trimmed_history.append(user_message)
-        tokens_used += user_message_tokens
-    else:
-        # Trimming history until it fits
-        while trimmed_history and tokens_used + user_message_tokens > max_tokens:
-            removed = trimmed_history.pop(0)
-            tokens_used -= len(encoding.encode(removed + "\n"))
+        # Adding user message to trimmed history if it fits
+        if tokens_used + user_message_tokens <= max_tokens:
+            trimmed_history.append(user_message)
+            tokens_used += user_message_tokens
+        else:
+            # Trimming history until it fits
+            while trimmed_history and tokens_used + user_message_tokens > max_tokens:
+                removed = trimmed_history.pop(0)
+                tokens_used -= len(encoding.encode(removed + "\n"))
 
-        trimmed_history.append(user_message)
-        tokens_used += user_message_tokens
-    
-    total_prompt_tokens = tokens_used
+            trimmed_history.append(user_message)
+            tokens_used += user_message_tokens
+        
+        total_prompt_tokens = tokens_used
 
-    bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_input=user_input)
-    save_history()
+        bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_input=user_input)
+        save_history()
 
     if service_config.get("chatml", False):
         # ChatML-prompt
@@ -712,9 +747,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             case _:
                 raise ValueError(f"❌ Неизвестный тип сервиса: {service_type}")
       
+        _, my_position = await send_func(
+            user_id,
+            prompt,
+            bot_state,
+            use_translation = role_entry.get("use_translation", False),
+            translate_func = translate_prompt_to_english,
+            reverse_translate_func = translate_prompt_to_russian,
+            get_position_only = True
+        )
+
+        if my_position > 1:
+            await update.effective_message.reply_text(
+                f"⏳ Сейчас думатель занят другими... Ты — *{my_position}-й* в очереди.",
+                parse_mode="Markdown"
+            )
+
         thinking_message = await update.effective_message.reply_text(f"{emoji} {char['name']} думает... 🤔")
 
-        reply = send_func(
+        reply, _ = await send_func(
             user_id,
             prompt,
             bot_state,
@@ -727,19 +778,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             print(f"\n📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {max_tokens}\n")
 
         # History update
-        trimmed_history.append(f"{char['name']}: {reply}")
-        save_history()
-
-        bot_state.append_to_archive_user(
-            user_id,
-            role_key,
-            "assistant",
-            reply,
-            username,
-            full_name,
-            scenario_file=scenario_file,
-            world_name=world.get("name", "")
-        )
+        async with lock:
+            trimmed_history.append(f"{char['name']}: {reply}")
+            save_history()
+            bot_state.append_to_archive_user(
+                user_id,
+                role_key,
+                "assistant",
+                reply,
+                username,
+                full_name,
+                scenario_file=scenario_file,
+                world_name=world.get("name", "")
+            )
 
     except Exception as e:
         reply = f"Ошибка запроса к модели: {e}"
@@ -769,7 +820,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     ]]
     bot_msg = await safe_send_markdown(update, formatted_reply, reply, buttons)
 
-    bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_bot_id=bot_msg.message_id)
+    async with lock:
+        bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_bot_id=bot_msg.message_id)
 
 
 
@@ -801,24 +853,27 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_state.set_world_info(user_id, world)
 
         # History management
-        user_histories = bot_state.user_history.setdefault(user_id, {})
-        if selected_file not in user_histories:
-            user_histories[selected_file] = {
-                "history": [],
-                "last_input": "",
-                "last_bot_id": None
-            }
+        lock = bot_state.get_user_lock(user_id)
+        async with lock:
 
-        # Getting translation flag from the previous role
-        prev_role = bot_state.get_user_role(user_id)
-        use_translation = prev_role.get("use_translation", False) if prev_role else False        
-        
-        # Deleting user role
-        bot_state.clear_user_role(user_id)
-        bot_state.set_user_role(user_id, role=None, scenario_file=selected_file, use_translation=use_translation)
+            user_histories = bot_state.user_history.setdefault(user_id, {})
+            if selected_file not in user_histories:
+                user_histories[selected_file] = {
+                    "history": [],
+                    "last_input": "",
+                    "last_bot_id": None
+                }
 
-        save_roles()
-        save_history()
+            # Getting translation flag from the previous role
+            prev_role = bot_state.get_user_role(user_id)
+            use_translation = prev_role.get("use_translation", False) if prev_role else False        
+            
+            # Deleting user role
+            bot_state.clear_user_role(user_id)
+            bot_state.set_user_role(user_id, role=None, scenario_file=selected_file, use_translation=use_translation)
+
+            save_roles()
+            save_history()
 
         # Roles list
         role_lines = [
@@ -842,41 +897,45 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # If intro_scene and history is empty — show intro scene
-        intro_scene = world.get("intro_scene", "")
-        user_data = bot_state.get_user_history(user_id, selected_file)
-        if intro_scene and not user_data["history"]:
-            narrator_entry = f"Narrator: {intro_scene}"
-            user_data["history"].append(narrator_entry)
-            bot_state.update_user_history(user_id, selected_file, user_data["history"])
-            save_history()
-            formatted_intro = safe_markdown_v2(intro_scene)
-            await safe_send_markdown(update, formatted_intro, intro_scene)
-        
-        # If history is not empty — show last two messages
-        elif user_data["history"]:
-            recent_messages = user_data["history"][-2:]
-            user_emoji = world.get("user_emoji", "🧑")
+        lock = bot_state.get_user_lock(user_id)
+        async with lock:
+            
+            intro_scene = world.get("intro_scene", "")
+            user_data = bot_state.get_user_history(user_id, selected_file)
 
-            for line in recent_messages:
-                if line.startswith("Narrator:"):
-                    text = line[len("Narrator:"):].strip()
-                    formatted =f"📜 {text}"
-                elif line.startswith(f"{user_emoji}:"):
-                    text = line[len(f"{user_emoji}:"):].strip()
-                    formatted = f"{user_emoji} {text}"
-                else:
-                    # Checking every character for a match
-                    found = False
-                    for _, char_data in characters.items():
-                        if line.startswith(f"{char_data['name']}:"):
-                            text = line[len(f"{char_data['name']}:"):].strip()
-                            formatted = f"{char_data.get('emoji', '🤖')} {text}"
-                            found = True
-                            break
+            if intro_scene and not user_data["history"]:
+                narrator_entry = f"Narrator: {intro_scene}"
+                user_data["history"].append(narrator_entry)
+                bot_state.update_user_history(user_id, selected_file, user_data["history"])
+                save_history()
+                formatted_intro = safe_markdown_v2(intro_scene)
+                await safe_send_markdown(update, formatted_intro, intro_scene)
+        
+            # If history is not empty — show last two messages
+            elif user_data["history"]:
+                recent_messages = user_data["history"][-2:]
+                user_emoji = world.get("user_emoji", "🧑")
+
+                for line in recent_messages:
+                    if line.startswith("Narrator:"):
+                        text = line[len("Narrator:"):].strip()
+                        formatted =f"📜 {text}"
+                    elif line.startswith(f"{user_emoji}:"):
+                        text = line[len(f"{user_emoji}:"):].strip()
+                        formatted = f"{user_emoji} {text}"
+                    else:
+                        # Checking every character for a match
+                        found = False
+                        for _, char_data in characters.items():
+                            if line.startswith(f"{char_data['name']}:"):
+                                text = line[len(f"{char_data['name']}:"):].strip()
+                                formatted = f"{char_data.get('emoji', '🤖')} {text}"
+                                found = True
+                                break
+                        
+                        if not found:
+                            formatted = line
                     
-                    if not found:
-                        formatted = line
-                
                 markdown_formatted = safe_markdown_v2(formatted)
                 await safe_send_markdown(update, markdown_formatted, formatted)
 
@@ -918,9 +977,12 @@ async def role_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     use_translation = role_entry.get("use_translation", False)
 
     # new translation flag
-    bot_state.set_user_role(user_id, role=role_key, scenario_file=scenario_file,
-                             use_translation=use_translation)
-    save_roles()
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
+
+        bot_state.set_user_role(user_id, role=role_key, scenario_file=scenario_file,
+                                use_translation=use_translation)
+        save_roles()
 
     char = characters[role_key]
     await query.edit_message_text(
@@ -949,19 +1011,22 @@ async def service_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_role = bot_state.get_user_role(user_id) or {}
 
     # "service" update
-    bot_state.set_user_role(
-        user_id,
-        role=user_role.get("role"),
-        scenario_file=user_role.get("scenario"),
-        use_translation=user_role.get("use_translation", False),
-        service=selected_service
-    )
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
 
-    if bot_state.debug_mode:
-        new_role = bot_state.get_user_role(user_id)
-        print(f"📄 user_role после обновления: {json.dumps(new_role, indent=2, ensure_ascii=False)}")
+        bot_state.set_user_role(
+            user_id,
+            role=user_role.get("role"),
+            scenario_file=user_role.get("scenario"),
+            use_translation=user_role.get("use_translation", False),
+            service=selected_service
+        )
 
-    save_roles()
+        if bot_state.debug_mode:
+            new_role = bot_state.get_user_role(user_id)
+            print(f"📄 user_role после обновления: {json.dumps(new_role, indent=2, ensure_ascii=False)}")
+
+        save_roles()
 
     await query.edit_message_text(f"🧠 Теперь ты используешь думатель: *{service_name}* ✨", parse_mode="Markdown")
 
