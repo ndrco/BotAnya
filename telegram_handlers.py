@@ -198,11 +198,17 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyboard = [
-        [InlineKeyboardButton(characters[key]["name"], callback_data=key)]
-        for key in characters
+        [
+            InlineKeyboardButton(
+                f"{char.get('emoji', '🤖')} {char['name']}",
+                callback_data=key
+            )
+        ]
+        for key, char in characters.items()
     ]
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Выбери персонажа:", reply_markup=reply_markup)
+    await update.message.reply_text("🎭 Выбери персонажа:", reply_markup=reply_markup)
 
 
 
