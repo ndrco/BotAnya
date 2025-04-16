@@ -36,6 +36,7 @@ def send_prompt_to_ollama(user_id: str, prompt: str, bot_state, use_translation:
         "model": service_config.get("model"),
         "prompt": prompt,
         "stream": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": {
             "temperature": service_config.get("temperature", 1.0),
             "top_p": service_config.get("top_p", 0.95),

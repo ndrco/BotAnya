@@ -18,4 +18,4 @@ MAX_LENGTH = 4096
 
 # Time of keep-alive for Ollama models
 # controls how long the model will stay loaded into memory following the request
-OLLAMA_KEEP_ALIVE = "1"  # seconds
+OLLAMA_KEEP_ALIVE = 600  # seconds
