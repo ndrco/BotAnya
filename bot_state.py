@@ -181,27 +181,17 @@ class BotState:
     
 
     # === LAST PAIR VALIDATION ===
-    def is_valid_last_exchange(self, user_id, scenario_file, char_name, world):
+    def is_valid_last_exchange(self, user_id, scenario_file):
         data = self.get_user_history(user_id, scenario_file)
         history = data.get("history", [])
 
-        user_prefix = f"{world.get('user_emoji', '👤')}:"
-        assistant_prefix = f"{char_name}:"
-
-        # Check if the last two messages are from user and assistant respectively
         if len(history) >= 2:
-            last_msg = history[-2]
-            last_reply = history[-1]
-            if last_msg.startswith(user_prefix) and last_reply.startswith(assistant_prefix):
+            if data.get("last_input") and data.get("last_bot_id") is not None:
                 return True
-
-        # Check if the last message is from the user and the last bot ID is not None
-        if data.get("last_input") and data.get("last_bot_id") is not None:
-            return True
-
         return False
 
 
+    ## === STRINGS ===
     def __str__(self):
         return (
             f"BotState:\n"

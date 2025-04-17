@@ -3,18 +3,20 @@
 
 import json
 import os
+import asyncio
 import tiktoken
 from telegram import Update, BotCommand, InlineKeyboardButton,Message,\
                          InlineKeyboardMarkup, CallbackQuery, ForceReply
 from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, \
                          ContextTypes, filters
 from translate_utils import translate_prompt_to_english, translate_prompt_to_russian
+from telegram.constants import ChatAction
 from bot_state import bot_state, load_characters, save_roles, save_history
 from utils import safe_markdown_v2, smart_trim_history, build_chatml_prompt, \
                         build_plain_prompt, wrap_chatml_prompt, build_scene_prompt
 from ollama_client import send_prompt_to_ollama
 from gigachat_client import send_prompt_to_gigachat
-from config import (CONFIG_FILE, SCENARIOS_DIR, MAX_LENGTH)
+from config import (SCENARIOS_DIR, MAX_LENGTH)
 
 
 
@@ -42,6 +44,15 @@ def register_handlers(app):
     app.add_handler(CallbackQueryHandler(scenario_button, pattern="^scenario:"))
     app.add_handler(CallbackQueryHandler(service_button, pattern=r"^service:"))
     app.add_handler(CallbackQueryHandler(role_button))
+
+
+
+
+# Function to show typing animation
+async def show_typing_animation(context, chat_id, stop_event):
+    while not stop_event.is_set():
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        await asyncio.sleep(6)  # Telegram показывает "печатает..." на ~5 секунд
 
 
 
@@ -265,6 +276,9 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     thinking_message = await update.message.reply_text("🎬 Генерирую сцену... подожди немного ☕")
 
+    stop_typing = asyncio.Event()
+    typing_task = asyncio.create_task(show_typing_animation(context, update.effective_chat.id, stop_typing))
+
     try:
         # Sending prompt
         reply_scene, _ = await send_func(
@@ -276,7 +290,10 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reverse_translate_func=translate_prompt_to_russian
         )
     except Exception as e:
-        reply_scene = f"⚠️ Ошибка генерации сцены: {e}"    
+        reply_scene = f"⚠️ Ошибка генерации сцены: {e}"
+    finally:
+        stop_typing.set()
+        await typing_task       
 
     await thinking_message.delete()
 
@@ -297,7 +314,7 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         bot_msg = await safe_send_markdown(update, formatted_scene, reply_scene, buttons)
 
-        bot_state.update_user_history(user_id, scenario_file, user_data["history"], last_bot_id=bot_msg.message_id)
+        bot_state.update_user_history(user_id, scenario_file, user_data["history"], last_input="*Опиши сцену*", last_bot_id=bot_msg.message_id)
         save_history()
 
 
@@ -349,33 +366,53 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
 
-    char, world, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
+    # Getting character and world for the user
+    _, _, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
     if error:
         await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
-    
+
+    call_scene_after = False
+    override_input = None
+
     lock = bot_state.get_user_lock(user_id)
     async with lock:
         user_data = bot_state.get_user_history(user_id, scenario_file)
+        history = user_data.get("history", [])
 
-        if not user_data or "last_input" not in user_data:
-            await update.effective_message.reply_text("❗ Нет предыдущего сообщения для повтора.")
+        if not history:
+            await update.effective_message.reply_text("⚠️ История пуста — нечего повторять.")
             return
 
-        char_name = char["name"]
+        last_reply = history[-1]
+        
+        # If the last reply is from the narrator, we can repeat the last scene
+        if last_reply.startswith("Narrator:"):
+            history_cut = history[:-1]
+            bot_state.update_user_history(user_id, scenario_file, history_cut)
+            save_history()
+            
+            await update.effective_message.reply_text("🔁 Повторю последнюю сцену...")
+            call_scene_after = True
 
-        if bot_state.is_valid_last_exchange(user_id, scenario_file, char_name, world):
-            history_cut = user_data["history"][:-2]
+        # If the last reply is from the bot, we can repeat the last message
+        elif bot_state.is_valid_last_exchange(user_id, scenario_file):
+            history_cut = history[:-2]
             bot_state.update_user_history(user_id, scenario_file, history_cut, last_input=user_data["last_input"])
             save_history()
-            if bot_state.debug_mode:
-                print(f"🔁 История пользователя {user_id} обрезана на 2 сообщения (retry)")
+
+            await update.effective_message.reply_text("🔁 Перегенерирую последний ответ...")
+            override_input = user_data["last_input"]
+
         else:
-            await update.effective_message.reply_text("⚠️ Нельзя перегенерировать: последние сообщения не соответствуют шаблону.")
+            await update.effective_message.reply_text("⚠️ Перегенерация не возможна.")
             return
 
-    await update.effective_message.reply_text("🔁 Перегенерирую последний ответ...")
-    await handle_message(update, context, override_input=user_data["last_input"])
+    if call_scene_after:
+        await scene_command(update, context)
+    elif override_input:
+        await handle_message(update, context, override_input=override_input)    
+
 
 
 
@@ -409,7 +446,7 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         char_name = char["name"]
 
-        if bot_state.is_valid_last_exchange(user_id, scenario_file, char_name, world):
+        if bot_state.is_valid_last_exchange(user_id, scenario_file):
             history_cut = user_data["history"][:-2]
             bot_state.update_user_history(user_id, scenario_file, history_cut, last_input=user_data["last_input"])
             save_history()
@@ -734,6 +771,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     thinking_message = None
 
+    stop_typing = asyncio.Event()
+    typing_task = asyncio.create_task(show_typing_animation(context, update.effective_chat.id, stop_typing))
+
     try:
         emoji = char.get("emoji", "")
         
@@ -796,6 +836,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         reply = f"Ошибка запроса к модели: {e}"
 
     finally:
+        stop_typing.set()
+        await typing_task
+        
         if thinking_message:
             try:
                 await thinking_message.delete()
@@ -1035,17 +1078,18 @@ async def service_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # continue_reply handler
 async def continue_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query: CallbackQuery = update.callback_query
     await query.answer()
-    # /handle_message is called from the callback
-    await handle_message(update, context, override_input="Продолжай")
+    #/continue command is called from the callback
+    await continue_command(update, context)
+
 
 
 
 
 # retry_callback handler
 async def retry_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query: CallbackQuery = update.callback_query
     await query.answer()
     # /retry command is called from the callback
     await retry_command(update, context)

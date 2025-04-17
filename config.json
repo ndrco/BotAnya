@@ -89,7 +89,7 @@
     "gigachat": {
       "name": "GigaChat",
       "type": "gigachat",
-      "model": "GigaChat:latest",
+      "model": "GigaChat-2",
       "url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
       "scope": "GIGACHAT_API_PERS",
       "auth_url": "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
@@ -98,7 +98,7 @@
       "min_p": 0.0,
       "num_predict": 300,
       "stop": [],
-      "max_tokens": 28000,
+      "max_tokens": 120000,
       "repeat_penalty": 1.0,
       "frequency_penalty": 0.0,
       "presence_penalty": 0.0,
