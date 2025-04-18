@@ -348,7 +348,7 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
 
-    # Получаем информацию о персонаже и мире пользователя
+    # Get char and user info
     char, world, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
     if error:
         await update.effective_message.reply_text(error, parse_mode="Markdown")
@@ -359,23 +359,28 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_emoji = world.get("user_emoji", "👤")
     user_name = world.get("user_name", "Пользователь")
 
-    # Формируем базовый промпт сцены
-    base_prompt = build_scene_prompt(world_prompt, char, user_emoji, user_name, user_role)
+    # Получаем последние строки из истории
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
+        user_data = bot_state.get_user_history(user_id, scenario_file)
+        recent_history = user_data.get("history", [])[-5:]  # last 5 messages
+
+    # Base prompt
+    base_prompt = build_scene_prompt(world_prompt, char, user_emoji, user_name, user_role, recent_history)
     service_config = bot_state.get_user_service_config(user_id)
     
-    # Учитываем формат промпта (ChatML или нет)
+    # Prompt format
     if service_config.get("chatml", False):
         prompt = wrap_chatml_prompt(base_prompt)
     else:
         prompt = base_prompt
 
-    # Используем единую функцию отправки и обработки ответа
     await _generate_and_send(
         update, context,
         user_id=user_id,
         scenario_file=scenario_file,
         prompt=prompt,
-        last_input="",  # last_input пустой, так как это новая сцена
+        last_input="",  # last_input empty
         current_char="Narrator",
         char_emoji="📜"
     )
@@ -795,6 +800,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /reset — сбросить историю\n"
         "• /help — показать это сообщение\n\n"
         "• /service — сменить думатель\n"
+        "Если тебе не нравится развитие истории, попробуй сменить думатель.\n"
         f"Сейчас включен думатель: *{service_name}*.\n\n"
         "• /lang — сменить язык думателя бота (EN/RUS). "
         "*EN* - бот думает по английски, говорит по русски. *RU* - все по русски.\n"

@@ -225,18 +225,22 @@ def build_plain_prompt_no_tail(
 
 
 # Scene-prompt builder
-def build_scene_prompt(world_prompt: str, char: dict, user_emoji: str, user_name: str, user_role: str) -> str:
+def build_scene_prompt(world_prompt: str, char: dict, user_emoji: str, user_name: str, user_role: str, recent_history: List[str] = None) -> str:
     base_prompt = (
         f"{world_prompt.strip()}\n\n"
         f"Ты пишешь сцену в жанре ролевой игры.\n"
         f"Ты играешь за персонажа — {char.get('emoji', '')} {char['name']}, {char['description']}.\n "
         f"Пользователь играет роль главного героя — {user_emoji}, {user_name}, {user_role.strip()}.\n"
         f"Опиши насыщенную, атмосферную и короткую сцену, как в визуальной новелле или аниме. "
-        f"Действие, диалог и настроение важны.\n"
+        f"Где находятся герои, как выглядят, какие предметы их окружают, и другие детали, котрые помогают читателю представить сцену.\n"
         f"Текст — от лица рассказчика.\n"
-        f"Начни диалог между персонажем ({char['name']}) и {user_name}.\n"
-        f"Пусть первый говорит персонаж ({char['name']}).\n\n"
+        f"В сцене присутствуют твой персонаж ({char['name']}) и персонаж {user_name}.\n"
     )
+    
+    if recent_history:
+        history_text = "\n".join(recent_history)
+        base_prompt += f"Последние события диалога:\n{history_text}\n\n"    
+    
     return base_prompt
 
 
