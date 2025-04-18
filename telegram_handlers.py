@@ -861,11 +861,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     user_name = world.get("user_name", "Пользователь")
     user_emoji = world.get("user_emoji", "🧑")
     world_prompt = world.get("system_prompt", "")
+
     base_prompt = build_system_prompt(world_prompt, char, user_emoji, user_name, user_role_description)
     service_config = bot_state.get_user_service_config(user_id)
     if service_config is None:
         await update.effective_message.reply_text("⚠️ Ошибка: выбранный думатель не найден. Попробуй /service.")
         return
+    
     tokens_used = len(bot_state.encoding.encode(base_prompt))
 
     # Getting user history and trimming it if necessary
@@ -876,28 +878,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         history = user_data["history"]
         
         max_tokens = service_config.get("max_tokens", 7000)
+
+        user_message = f"{user_name}: {user_input}"
+        history.append(user_message)
+        
         trimmed_history, tokens_used = smart_trim_history(history, bot_state.encoding,
                                                         max_tokens - tokens_used)
 
-        user_message = f"{user_name}: {user_input}"
-        user_message_tokens = len(bot_state.encoding.encode(user_message + "\n"))
-
-        # Adding user message to trimmed history if it fits
-        if tokens_used + user_message_tokens <= max_tokens:
-            trimmed_history.append(user_message)
-            tokens_used += user_message_tokens
-        else:
-            # Trimming history until it fits
-            while trimmed_history and tokens_used + user_message_tokens > max_tokens:
-                removed = trimmed_history.pop(0)
-                tokens_used -= len(bot_state.encoding.encode(removed + "\n"))
-
-            trimmed_history.append(user_message)
-            tokens_used += user_message_tokens
-        
-        total_prompt_tokens = tokens_used
-
-        bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_input=user_input)
+        bot_state.update_user_history(user_id, scenario_file, history, last_input=user_input)
         save_history()
 
     if service_config.get("chatml", False):
@@ -909,7 +897,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         prompt = build_plain_prompt(base_prompt, trimmed_history, char['name'])
 
     if bot_state.debug_mode:
-        print(f"\n📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {max_tokens}\n")
+        print(f"\n📊 [Debug] Токенов в prompt: {tokens_used} / {max_tokens}\n")
 
     await _generate_and_send(
         update, context,
