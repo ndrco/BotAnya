@@ -4,7 +4,8 @@
 import json
 import os
 import asyncio
-from config import (CONFIG_FILE, CREDENTIALS_FILE, SCENARIOS_DIR, ROLES_FILE, HISTORY_FILE, LOG_DIR)
+import tiktoken
+from config import (CONFIG_FILE, CREDENTIALS_FILE, SCENARIOS_DIR, ROLES_FILE, HISTORY_FILE, LOG_DIR, TIKTOKEN_ENCODING)
 from datetime import datetime
 
 
@@ -20,6 +21,7 @@ class BotState:
         self.debug_mode = True
         self.bot_token = ""
         self.user_locks = {}
+        self.encoding = None
 
 
 
@@ -218,7 +220,7 @@ def init_config():
     bot_state.config, bot_state.credentials = load_config()
     bot_state.debug_mode = bot_state.config.get("debug_mode", True)
     bot_state.bot_token = bot_state.credentials.get("telegram_bot_token", "")
-
+    bot_state.encoding = tiktoken.get_encoding(TIKTOKEN_ENCODING)
     if bot_state.debug_mode:
         print("📦 Конфигурация загружена.")
 

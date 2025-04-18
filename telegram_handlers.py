@@ -4,7 +4,6 @@
 import json
 import os
 import asyncio
-import tiktoken
 from telegram import Update, BotCommand, InlineKeyboardButton,Message,\
                          InlineKeyboardMarkup, CallbackQuery, ForceReply
 from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, \
@@ -16,7 +15,8 @@ from translate_utils import translate_prompt_to_english, translate_prompt_to_rus
 from bot_state import bot_state, load_characters, save_roles, save_history
 from utils import safe_markdown_v2, smart_trim_history, build_chatml_prompt, \
                         build_plain_prompt, wrap_chatml_prompt, build_scene_prompt, \
-                        build_chatml_prompt_no_tail, build_plain_prompt_no_tail
+                        build_chatml_prompt_no_tail, build_plain_prompt_no_tail,  \
+                        build_system_prompt
 from ollama_client import send_prompt_to_ollama
 from gigachat_client import send_prompt_to_gigachat
 from config import (SCENARIOS_DIR, MAX_LENGTH)
@@ -344,13 +344,11 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-
-
 # /scene handler
 async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
 
-    # Getting character and world for the user
+    # Получаем информацию о персонаже и мире пользователя
     char, world, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
     if error:
         await update.effective_message.reply_text(error, parse_mode="Markdown")
@@ -361,83 +359,26 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_emoji = world.get("user_emoji", "👤")
     user_name = world.get("user_name", "Пользователь")
 
-    # Prompt building
+    # Формируем базовый промпт сцены
     base_prompt = build_scene_prompt(world_prompt, char, user_emoji, user_name, user_role)
     service_config = bot_state.get_user_service_config(user_id)
     
+    # Учитываем формат промпта (ChatML или нет)
     if service_config.get("chatml", False):
         prompt = wrap_chatml_prompt(base_prompt)
     else:
         prompt = base_prompt
 
-    service_type = service_config.get("type")
-    match service_type:
-        case "ollama":
-            send_func = send_prompt_to_ollama
-        case "gigachat":
-            send_func = send_prompt_to_gigachat
-        case _:
-            raise ValueError(f"❌ Неизвестный тип сервиса: {service_type}")
-
-    _, my_position = await send_func(
-        user_id,
-        prompt,
-        bot_state,
-        use_translation=bot_state.get_user_role(user_id).get("use_translation", False),
-        translate_func = translate_prompt_to_english,
-        reverse_translate_func = translate_prompt_to_russian,
-        get_position_only = True
+    # Используем единую функцию отправки и обработки ответа
+    await _generate_and_send(
+        update, context,
+        user_id=user_id,
+        scenario_file=scenario_file,
+        prompt=prompt,
+        last_input="",  # last_input пустой, так как это новая сцена
+        current_char="Narrator",
+        char_emoji="📜"
     )
-
-    if my_position > 1:
-        await update.effective_message.reply_text(
-            f"⏳ Сейчас думатель занят другими... Ты — *{my_position}-й* в очереди.",
-            parse_mode="Markdown"
-        )
-
-    thinking_message = await update.effective_message.reply_text("🎬 Генерирую сцену... подожди немного ☕")
-
-    stop_typing = asyncio.Event()
-    typing_task = asyncio.create_task(_show_typing_animation(context, update.effective_chat.id, stop_typing))
-
-    try:
-        # Sending prompt
-        reply_scene, _ = await send_func(
-            user_id,
-            prompt,
-            bot_state,
-            use_translation=bot_state.get_user_role(user_id).get("use_translation", False),
-            translate_func=translate_prompt_to_english,
-            reverse_translate_func=translate_prompt_to_russian
-        )
-    except Exception as e:
-        reply_scene = f"⚠️ Ошибка генерации сцены: {e}"
-    finally:
-        stop_typing.set()
-        await typing_task       
-
-    await thinking_message.delete()
-
-    # History management
-    lock = bot_state.get_user_lock(user_id)
-    async with lock:
-
-        user_data = bot_state.get_user_history(user_id, scenario_file)
-        narrator_entry = f"Narrator: {reply_scene}"
-        user_data["history"].append(narrator_entry)
-        
-        formatted_scene = safe_markdown_v2(reply_scene)
-
-        buttons = [[
-            InlineKeyboardButton("🔁 Повторить", callback_data="cb_retry"),
-            InlineKeyboardButton("⏭ Продолжить", callback_data="continue_reply"),
-        ]]
-        
-        bot_msg = await _safe_send_markdown(update, formatted_scene, reply_scene, buttons)
-
-        bot_state.update_user_history(user_id, scenario_file, user_data["history"], last_bot_id=bot_msg.message_id)
-        save_history()
-        
 
 
 
@@ -579,7 +520,6 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_char=name,
         char_emoji=char.get("emoji", "🤖")
     )
-
 
 
 
@@ -913,15 +853,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     # Tokenization and prompt preparation
     user_role_description = world.get("user_role", "")
     user_name = world.get("user_name", "Пользователь")
+    user_emoji = world.get("user_emoji", "🧑")
     world_prompt = world.get("system_prompt", "")
-    base_prompt = f"{world_prompt}\n{user_name} — {user_role_description}.\n{char['prompt']}\n"
-
+    base_prompt = build_system_prompt(world_prompt, char, user_emoji, user_name, user_role_description)
     service_config = bot_state.get_user_service_config(user_id)
     if service_config is None:
         await update.effective_message.reply_text("⚠️ Ошибка: выбранный думатель не найден. Попробуй /service.")
         return
-    encoding = tiktoken.get_encoding(service_config.get("tiktoken_encoding", "gpt2"))
-    tokens_used = len(encoding.encode(base_prompt))
+    tokens_used = len(bot_state.encoding.encode(base_prompt))
 
     # Getting user history and trimming it if necessary
     lock = bot_state.get_user_lock(user_id)
@@ -931,11 +870,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         history = user_data["history"]
         
         max_tokens = service_config.get("max_tokens", 7000)
-        trimmed_history, tokens_used = smart_trim_history(history, encoding,
+        trimmed_history, tokens_used = smart_trim_history(history, bot_state.encoding,
                                                         max_tokens - tokens_used)
 
         user_message = f"{user_name}: {user_input}"
-        user_message_tokens = len(encoding.encode(user_message + "\n"))
+        user_message_tokens = len(bot_state.encoding.encode(user_message + "\n"))
 
         # Adding user message to trimmed history if it fits
         if tokens_used + user_message_tokens <= max_tokens:
@@ -945,7 +884,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             # Trimming history until it fits
             while trimmed_history and tokens_used + user_message_tokens > max_tokens:
                 removed = trimmed_history.pop(0)
-                tokens_used -= len(encoding.encode(removed + "\n"))
+                tokens_used -= len(bot_state.encoding.encode(removed + "\n"))
 
             trimmed_history.append(user_message)
             tokens_used += user_message_tokens
@@ -957,20 +896,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     if service_config.get("chatml", False):
         # ChatML-prompt
-        system_text = (
-            f"{world_prompt.strip()}\n"
-            f"Пользователь — {user_name}, {user_role_description.strip()}.\n"
-            f"{char['prompt'].strip()}\n"
-            f"Если пользователь пишет *в звёздочках* — это действие.\n"
-            f"Реагируй на поведение, не повторяя его в ответ.\n"
-            f"Отвечай кратко, по делу. Пиши как в визуальной новелле: короткие реплики, меньше описаний."
-        )
-        prompt = build_chatml_prompt(system_text, trimmed_history, user_name, char["name"])
+        prompt = build_chatml_prompt(base_prompt, trimmed_history, user_name, char["name"])
 
     else:
         # Plain text prompt
         prompt = build_plain_prompt(base_prompt, trimmed_history, char['name'])
 
+    if bot_state.debug_mode:
+        print(f"\n📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {max_tokens}\n")
+
+    await _generate_and_send(
+        update, context,
+        user_id=user_id,
+        scenario_file=scenario_file,
+        prompt=prompt,
+        last_input=user_input,
+        current_char=char["name"],
+        char_emoji=char.get("emoji", "🤖")
+    )
+
+    """
     thinking_message = None
 
     stop_typing = asyncio.Event()
@@ -1061,7 +1006,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     async with lock:
         bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_bot_id=bot_msg.message_id)
-
+"""
 
 
 

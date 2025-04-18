@@ -44,15 +44,10 @@ def safe_markdown_v2(text: str) -> str:
 
 
 
-
+"""
 # Trimming history to fit into max_tokens
 def smart_trim_history(history, enc, max_tokens=6000):
-    """
-    Smart history trimming:
-    - saves system-like blocks (Narrator, scenes)
-    - saves last n lines (user/assistant)
-    - fits into max_tokens (including system prompt and other parts)
-    """
+
     # 1. Find of Narrator-scenes system-like blocks
     preserved = []
     dialogue = []
@@ -82,6 +77,24 @@ def smart_trim_history(history, enc, max_tokens=6000):
     result = preserved + trimmed_dialogue
     total_tokens = preserved_tokens + dialogue_tokens
     return result, total_tokens
+"""
+
+
+
+# Trimming history to fit into max_tokens
+def smart_trim_history(history, enc, max_tokens=6000):
+    trimmed_dialogue = []
+    dialogue_tokens = 0
+
+    for msg in reversed(history):
+        msg_tokens = len(enc.encode(msg + "\n"))
+        if dialogue_tokens + msg_tokens <= max_tokens:
+            trimmed_dialogue.insert(0, msg)
+            dialogue_tokens += msg_tokens
+        else:
+            break
+
+    return trimmed_dialogue, dialogue_tokens
 
 
 
@@ -216,8 +229,8 @@ def build_scene_prompt(world_prompt: str, char: dict, user_emoji: str, user_name
     base_prompt = (
         f"{world_prompt.strip()}\n\n"
         f"Ты пишешь сцену в жанре ролевой игры.\n"
-        f"Ты играешь за персонажа — {char.get('emoji', '')} {char['name']}, {char['description']}, "
-        f"Пользователь играет роль главного героя — {user_emoji}, {user_name}, {user_role}.\n"
+        f"Ты играешь за персонажа — {char.get('emoji', '')} {char['name']}, {char['description']}.\n "
+        f"Пользователь играет роль главного героя — {user_emoji}, {user_name}, {user_role.strip()}.\n"
         f"Опиши насыщенную, атмосферную и короткую сцену, как в визуальной новелле или аниме. "
         f"Действие, диалог и настроение важны.\n"
         f"Текст — от лица рассказчика.\n"
@@ -225,6 +238,24 @@ def build_scene_prompt(world_prompt: str, char: dict, user_emoji: str, user_name
         f"Пусть первый говорит персонаж ({char['name']}).\n\n"
     )
     return base_prompt
+
+
+
+
+
+# System-prompt builder
+def build_system_prompt(world_prompt: str, char: dict, user_emoji: str, user_name: str, user_role: str) -> str:
+    system_prompt = (
+        f"{world_prompt.strip()}\n\n"
+        f"Пользователь — {user_emoji}, {user_name}, {user_role.strip()}.\n"        
+        f"{char['prompt'].strip()}\n"
+        f"Если пользователь пишет *в звёздочках* — это действие.\n"
+        f"Реагируй на поведение, не повторяя его в ответ.\n"
+        f"Отвечай кратко, по делу. Пиши как в визуальной новелле: короткие реплики, меньше описаний."
+    )
+    return system_prompt
+
+
 
 
 

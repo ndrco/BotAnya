@@ -12,6 +12,7 @@ from telegram.ext import ApplicationBuilder
 from telegram.request import HTTPXRequest
 from bot_state import bot_state, init_config, load_roles, save_roles, load_history, save_history
 from telegram_handlers import register_handlers, get_bot_commands
+from config import (CONNECT_TIMEOUT, READ_TIMEOUT)
 
 
 
@@ -27,10 +28,10 @@ async def main():
     load_roles()
     load_history()
 
-    # 👇 Настраиваем кастомные таймауты
+    # Telegram timeouts
     request = HTTPXRequest(
-        connect_timeout=10.0,  # подключение
-        read_timeout=20.0      # ожидание ответа
+        connect_timeout=CONNECT_TIMEOUT,
+        read_timeout=READ_TIMEOUT
     )
     app = ApplicationBuilder().concurrent_updates(True).token(bot_state.bot_token).request(request).build()
 
