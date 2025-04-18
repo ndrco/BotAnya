@@ -91,7 +91,7 @@ async def send_prompt_to_gigachat(user_id: str, prompt: str, bot_state, use_tran
         "presence_penalty": service_config.get("presence_penalty", 0.0)
     }
   
-    if bot_state.debug_mode:
+    if bot_state.debug_mode and not get_position_only:
         print("\n" + "="*60)
         print("📦 PAYLOAD для GigaChat:")
         print(json.dumps(payload, indent=2, ensure_ascii=False))

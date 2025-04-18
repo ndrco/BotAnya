@@ -57,7 +57,7 @@ async def send_prompt_to_ollama(user_id: str, prompt: str, bot_state, use_transl
         }
     }
 
-    if bot_state.debug_mode:
+    if bot_state.debug_mode and not get_position_only:
         print("\n" + "="*60)
         print("📦 PAYLOAD для Ollama:")
         print(json.dumps(payload, indent=2, ensure_ascii=False))
