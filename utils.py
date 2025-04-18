@@ -86,7 +86,7 @@ def smart_trim_history(history, enc, max_tokens=6000):
 
 
 
-
+"""
 # ChatML-prompt builder
 def build_chatml_prompt(system_prompt: str, history: List[str], user_emoji: str, current_char_name: str) -> str:
     blocks = [f"<|im_start|>system\n{system_prompt}<|im_end|>"]
@@ -121,21 +121,107 @@ def build_plain_prompt(base_prompt: str, history: List[str], current_char_name: 
     for msg in history:
         formatted_history.append(msg)
     return f"{base_prompt}\n" + "\n".join(formatted_history) + f"\n{current_char_name}:"
+"""
+
+
+
+# building ChatML prompt without tail
+def _assemble_chatml_blocks(
+    system_prompt: str,
+    history: List[str],
+    user_name: str,
+    current_char_name: str
+) -> List[str]:
+    """
+    building ChatML prompts without <|im_start|>assistant\n
+    """
+    blocks = [f"<|im_start|>system\n{system_prompt}<|im_end|>"]
+    for msg in history:
+        if msg.startswith(f"{user_name}:"):
+            text = msg[len(user_name)+1:].strip()
+            blocks.append(f"<|im_start|>user\n{text}<|im_end|>")
+        elif msg.startswith("Narrator:"):
+            text = msg[len("Narrator:"):].strip()
+            blocks.append(f"<|im_start|>system\n{text}<|im_end|>")
+        else:
+            speaker, text = msg.split(":", 1)
+            speaker = speaker.strip()
+            text = text.strip()
+            tag = "assistant" if speaker == current_char_name else speaker
+            blocks.append(f"<|im_start|>{tag}\n{text}<|im_end|>")
+    return blocks
+
+
+
+# building plain text prompt without tail
+def _assemble_plain_history(
+    base_prompt: str,
+    history: List[str]
+) -> str:
+
+    return f"{base_prompt}\n" + "\n".join(history)
+
+
+
+# building ChatML prompt with tail
+def build_chatml_prompt(
+    system_prompt: str,
+    history: List[str],
+    user_name: str,
+    current_char_name: str
+) -> str:
+
+    blocks = _assemble_chatml_blocks(system_prompt, history, user_name, current_char_name)
+    blocks.append("<|im_start|>assistant\n")
+    return "\n".join(blocks)
+
+
+
+# building ChatML prompt without tail
+def build_chatml_prompt_no_tail(
+    system_prompt: str,
+    history: List[str],
+    user_name: str,
+    current_char_name: str
+) -> str:
+    return "\n".join(_assemble_chatml_blocks(system_prompt, history, user_name, current_char_name))
+
+
+
+# building plain text prompt with tail
+def build_plain_prompt(
+    base_prompt: str,
+    history: List[str],
+    current_char_name: str
+) -> str:
+
+    plain = _assemble_plain_history(base_prompt, history)
+    return f"{plain}\n{current_char_name}:"
+
+
+
+# building plain text prompt without tail
+def build_plain_prompt_no_tail(
+    base_prompt: str,
+    history: List[str]
+) -> str:
+    return _assemble_plain_history(base_prompt, history)
+
+
 
 
 
 # Scene-prompt builder
-def build_scene_prompt(world_prompt: str, char: dict, user_role: str) -> str:
+def build_scene_prompt(world_prompt: str, char: dict, user_emoji: str, user_name: str, user_role: str) -> str:
     base_prompt = (
         f"{world_prompt.strip()}\n\n"
         f"Ты пишешь сцену в жанре ролевой игры.\n"
-        f"Ты играешь за персонажа — ({char.get('emoji', '')}) {char['name']}, {char['description']}, "
-        f"который ощущает себя так: \"{char['prompt']}\".\n"
-        f"Пользователь играет роль главного героя — {user_role}.\n"
+        f"Ты играешь за персонажа — {char.get('emoji', '')} {char['name']}, {char['description']}, "
+        f"Пользователь играет роль главного героя — {user_emoji}, {user_name}, {user_role}.\n"
         f"Опиши насыщенную, атмосферную и короткую сцену, как в визуальной новелле или аниме. "
         f"Действие, диалог и настроение важны.\n"
         f"Текст — от лица рассказчика.\n"
-        f"Начни диалог между персонажем ({char['name']}) и пользователем (в роли: {user_role}).\n"
+        f"Начни диалог между персонажем ({char['name']}) и {user_name}.\n"
         f"Пусть первый говорит персонаж ({char['name']}).\n\n"
     )
     return base_prompt

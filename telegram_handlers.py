@@ -9,11 +9,14 @@ from telegram import Update, BotCommand, InlineKeyboardButton,Message,\
                          InlineKeyboardMarkup, CallbackQuery, ForceReply
 from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, \
                          ContextTypes, filters
-from translate_utils import translate_prompt_to_english, translate_prompt_to_russian
+from telegram.error import BadRequest
 from telegram.constants import ChatAction
+from translate_utils import translate_prompt_to_english, translate_prompt_to_russian
+
 from bot_state import bot_state, load_characters, save_roles, save_history
 from utils import safe_markdown_v2, smart_trim_history, build_chatml_prompt, \
-                        build_plain_prompt, wrap_chatml_prompt, build_scene_prompt
+                        build_plain_prompt, wrap_chatml_prompt, build_scene_prompt, \
+                        build_chatml_prompt_no_tail, build_plain_prompt_no_tail
 from ollama_client import send_prompt_to_ollama
 from gigachat_client import send_prompt_to_gigachat
 from config import (SCENARIOS_DIR, MAX_LENGTH)
@@ -42,17 +45,9 @@ def register_handlers(app):
     app.add_handler(CallbackQueryHandler(retry_callback_handler, pattern="^cb_retry$"))
     app.add_handler(CallbackQueryHandler(edit_callback_handler, pattern="^cb_edit$"))
     app.add_handler(CallbackQueryHandler(scenario_button, pattern="^scenario:"))
-    app.add_handler(CallbackQueryHandler(service_button, pattern=r"^service:"))
+    app.add_handler(CallbackQueryHandler(service_button, pattern="^service:"))
     app.add_handler(CallbackQueryHandler(role_button))
 
-
-
-
-# Function to show typing animation
-async def show_typing_animation(context, chat_id, stop_event):
-    while not stop_event.is_set():
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        await asyncio.sleep(6)  # Telegram показывает "печатает..." на ~5 секунд
 
 
 
@@ -77,8 +72,18 @@ def get_bot_commands():
 
 
 
+
+# Function to show typing animation
+async def _show_typing_animation(context, chat_id, stop_event):
+    while not stop_event.is_set():
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        await asyncio.sleep(6)  # Telegram API allows sending typing action every 5 seconds
+
+
+
+
 # Function to send a message with MarkdownV2 formatting
-async def safe_send_markdown(update, text: str, original_text: str = None, buttons: list = None) -> Message:
+async def _safe_send_markdown(update, text: str, original_text: str = None, buttons: list = None) -> Message:
     """
         Safely sends a message with MarkdownV2. If formatting fails, retry without it.
 
@@ -91,20 +96,133 @@ async def safe_send_markdown(update, text: str, original_text: str = None, butto
     reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
     effective_message = update.effective_message
     
-    if not text.strip():
-        text = "⚠️ Ошибка: пустой ответ от модели. Попробуй ещё раз."
+    if not text or not text.strip():
+        return await effective_message.reply_text("⚠️ Думатель ничего не ответил ☹️. Попробуй ещё раз.")
     
     try:
+        # первый заход — с MarkdownV2
         return await effective_message.reply_text(
-            text, parse_mode="MarkdownV2", reply_markup=reply_markup
+            text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+    except BadRequest as e:
+        msg = str(e)
+        # fallback if it's a error with entities
+        if "can't parse entities" in msg or "Entity" in msg:
+            if bot_state.debug_mode:
+                print(f"⚠️ MarkdownV2 failed: {msg}\n→ отправляем plain text")
+            return await effective_message.reply_text(
+                original_text or text,
+                reply_markup=reply_markup
+            )
+        # else  try to send as plain text and log the error
+        if bot_state.debug_mode:
+            print(f"⚠️ BadRequest (non‑entities): {msg}\n→ отправляем plain text")
+        return await effective_message.reply_text(
+            original_text or text,
+            reply_markup=reply_markup
         )
     except Exception as e:
+        # other errors 
         if bot_state.debug_mode:
-            print(f"⚠️ Ошибка форматирования MarkdownV2: {e}")
-            print("📝 Повторная отправка без форматирования.")
+            print(f"⚠️ Неожиданная ошибка при отправке: {e}\n→ отправляем plain text")
         return await effective_message.reply_text(
-            original_text or text, reply_markup=reply_markup
+            original_text or text,
+            reply_markup=reply_markup
         )
+
+
+
+
+# Function to handle messages
+async def _generate_and_send(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: str,
+    scenario_file: str,
+    prompt: str,
+    last_input: str,
+    current_char: str,
+    char_emoji: str
+):
+    """
+    Helper function to generate and send a message.: 
+        - waits in queue,
+        - shows "prints",
+        - sends prompt to model,
+        - formats response,
+        - puts it in history,
+        - displays response with buttons.
+    """
+    # service selection
+    service_config = bot_state.get_user_service_config(user_id)
+    match service_config.get("type"):
+        case "ollama":
+            send_func = send_prompt_to_ollama
+        case "gigachat":
+            send_func = send_prompt_to_gigachat
+        case other:
+            await update.effective_message.reply_text(f"❌ Неизвестный тип сервиса: {other}")
+            return
+
+    # queue position
+    _, pos = await send_func(
+        user_id, prompt, bot_state,
+        use_translation=bot_state.get_user_role(user_id).get("use_translation", False),
+        translate_func=translate_prompt_to_english,
+        reverse_translate_func=translate_prompt_to_russian,
+        get_position_only=True
+    )
+    if pos and pos > 1:
+        await update.effective_message.reply_text(
+            f"⏳ Ты в очереди: *{pos}*-й.", parse_mode="Markdown"
+        )
+
+    # typing animation
+    thinking = await update.effective_message.reply_text("⌛️ Думаю…")
+    stop = asyncio.Event()
+    task = asyncio.create_task(_show_typing_animation(context, update.effective_chat.id, stop))
+
+    # response generation
+    try:
+        reply, _ = await send_func(
+            user_id, prompt, bot_state,
+            use_translation=bot_state.get_user_role(user_id).get("use_translation", False),
+            translate_func=translate_prompt_to_english,
+            reverse_translate_func=translate_prompt_to_russian
+        )
+    except Exception as e:
+        reply = f"⚠️ Ошибка: {e}"
+    finally:
+        stop.set()
+        await task
+    try:
+        await thinking.delete()
+    except Exception:
+        pass
+
+    # formatting response and buttons
+    display = f"{char_emoji}: {reply}".strip()
+    formatted = safe_markdown_v2(display)
+    buttons = [[
+        InlineKeyboardButton("🔁 Повторить", callback_data="cb_retry"),
+        InlineKeyboardButton("⏭ Продолжить", callback_data="continue_reply"),
+        InlineKeyboardButton("✂️ Изменить", callback_data="cb_edit"),
+    ]]
+    bot_msg = await _safe_send_markdown(update, formatted, display, buttons)
+
+    # saving history
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
+        data = bot_state.get_user_history(user_id, scenario_file)
+        data["history"].append(f"{current_char}: {reply}")
+        bot_state.update_user_history(
+            user_id, scenario_file, data["history"],
+            last_input=last_input, last_bot_id=bot_msg.message_id
+        )
+        save_history()
+
 
 
 
@@ -235,15 +353,18 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Getting character and world for the user
     char, world, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
     if error:
-        await update.message.reply_text(error, parse_mode="Markdown")
+        await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
 
     user_role = world.get("user_role", "неизвестная роль")
     world_prompt = world.get("system_prompt", "")
+    user_emoji = world.get("user_emoji", "👤")
+    user_name = world.get("user_name", "Пользователь")
 
     # Prompt building
-    base_prompt = build_scene_prompt(world_prompt, char, user_role)
+    base_prompt = build_scene_prompt(world_prompt, char, user_emoji, user_name, user_role)
     service_config = bot_state.get_user_service_config(user_id)
+    
     if service_config.get("chatml", False):
         prompt = wrap_chatml_prompt(base_prompt)
     else:
@@ -274,10 +395,10 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-    thinking_message = await update.message.reply_text("🎬 Генерирую сцену... подожди немного ☕")
+    thinking_message = await update.effective_message.reply_text("🎬 Генерирую сцену... подожди немного ☕")
 
     stop_typing = asyncio.Event()
-    typing_task = asyncio.create_task(show_typing_animation(context, update.effective_chat.id, stop_typing))
+    typing_task = asyncio.create_task(_show_typing_animation(context, update.effective_chat.id, stop_typing))
 
     try:
         # Sending prompt
@@ -312,10 +433,11 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("⏭ Продолжить", callback_data="continue_reply"),
         ]]
         
-        bot_msg = await safe_send_markdown(update, formatted_scene, reply_scene, buttons)
+        bot_msg = await _safe_send_markdown(update, formatted_scene, reply_scene, buttons)
 
-        bot_state.update_user_history(user_id, scenario_file, user_data["history"], last_input="*Опиши сцену*", last_bot_id=bot_msg.message_id)
+        bot_state.update_user_history(user_id, scenario_file, user_data["history"], last_bot_id=bot_msg.message_id)
         save_history()
+        
 
 
 
@@ -348,7 +470,8 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_role_desc:
         user_emoji = world.get("user_emoji", "👤")
-        text += f"🎭 *Ты в этом мире:* {user_emoji} _{user_role_desc}_\n\n"
+        user_name = world.get("user_name", "Пользователь")
+        text += f"🎭 *Ты в этом мире:* {user_emoji} {user_name} _{user_role_desc}_\n\n"
 
     if service_name:
         text += (
@@ -366,52 +489,97 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
 
-    # Getting character and world for the user
-    _, _, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
+    char, world, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
     if error:
         await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
 
-    call_scene_after = False
-    override_input = None
+    name = char["name"]
+    user_name = world.get("user_name", "Пользователь")
 
     lock = bot_state.get_user_lock(user_id)
-    async with lock:
-        user_data = bot_state.get_user_history(user_id, scenario_file)
-        history = user_data.get("history", [])
+    do_continue = False
+    do_scene = False
 
-        if not history:
+    async with lock:
+        data = bot_state.get_user_history(user_id, scenario_file)
+        history = data["history"]
+        last_input = data.get("last_input", "")
+        last_bot_id = data.get("last_bot_id")
+
+        if not history or not last_bot_id:
             await update.effective_message.reply_text("⚠️ История пуста — нечего повторять.")
             return
 
-        last_reply = history[-1]
-        
-        # If the last reply is from the narrator, we can repeat the last scene
-        if last_reply.startswith("Narrator:"):
-            history_cut = history[:-1]
-            bot_state.update_user_history(user_id, scenario_file, history_cut)
-            save_history()
-            
-            await update.effective_message.reply_text("🔁 Повторю последнюю сцену...")
-            call_scene_after = True
+        last = history[-1]
 
-        # If the last reply is from the bot, we can repeat the last message
-        elif bot_state.is_valid_last_exchange(user_id, scenario_file):
-            history_cut = history[:-2]
-            bot_state.update_user_history(user_id, scenario_file, history_cut, last_input=user_data["last_input"])
+        # If was Narrator scene
+        if last.startswith("Narrator:"):
+            history.pop()
+            bot_state.update_user_history(user_id, scenario_file, history)
             save_history()
+            try:
+                await context.bot.delete_message(update.effective_chat.id, last_bot_id)
+            except:
+                pass
+            do_scene = True
 
-            await update.effective_message.reply_text("🔁 Перегенерирую последний ответ...")
-            override_input = user_data["last_input"]
+        # If there is no user message before the last bot message,
+        # this means there was a call via "continue"
+        elif len(history) < 2 or not history[-2].startswith(f"{user_name}:"):
+            history.pop()  # delete the bot message
+            bot_state.update_user_history(user_id, scenario_file, history)
+            save_history()
+            try:
+                await context.bot.delete_message(update.effective_chat.id, last_bot_id)
+            except:
+                pass
+            do_continue = True
+
+        # char retry 
+        elif last.startswith(f"{name}:"):
+            history.pop()  # delete the bot message
+            bot_state.update_user_history(user_id, scenario_file, history, last_input=last_input)
+            save_history()            
+            try:
+                await context.bot.delete_message(update.effective_chat.id, last_bot_id)
+            except:
+                pass
 
         else:
-            await update.effective_message.reply_text("⚠️ Перегенерация не возможна.")
+            await update.effective_message.reply_text("⚠️ Нельзя перегенерировать это сообщение.")
             return
 
-    if call_scene_after:
-        await scene_command(update, context)
-    elif override_input:
-        await handle_message(update, context, override_input=override_input)    
+    if do_continue:
+        return await continue_command(update, context)
+    if do_scene:
+        return await scene_command(update, context)
+
+    # ordinary retry
+    base = f"{world.get('system_prompt')}\n{user_name} — {world.get('user_role')}.\n{char['prompt']}\n"
+    hist_for_prompt = history.copy()
+    
+    # Если сообщение пользователя было удалено, то добавляем его обратно один раз
+    #if last_input and (not history or history[-1] != f"{user_name}: {last_input}"):
+    #    hist_for_prompt.append(f"{user_name}: {last_input}")
+
+    if bot_state.get_user_service_config(user_id).get("chatml", False):
+        prompt = build_chatml_prompt_no_tail(world.get("system_prompt"), hist_for_prompt, user_name, name)
+    else:
+        prompt = build_plain_prompt_no_tail(base, hist_for_prompt)
+
+    await update.effective_message.reply_text("🔁 Перегенерирую последний ответ…")
+
+    await _generate_and_send(
+        update, context,
+        user_id=user_id,
+        scenario_file=scenario_file,
+        prompt=prompt,
+        last_input=last_input,
+        current_char=name,
+        char_emoji=char.get("emoji", "🤖")
+    )
+
 
 
 
@@ -419,8 +587,48 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # /continue handler
 async def continue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This function is called when the user clicks the "Continue" button
-    await handle_message(update, context, override_input="Продолжай")
+    user_id = str(update.effective_user.id)
+
+    # 1) Check if user has a character and world
+    char, world, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
+    if error:
+        await update.effective_message.reply_text(error, parse_mode="Markdown")
+        return
+
+    # 2) History and last input
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
+        user_data = bot_state.get_user_history(user_id, scenario_file)
+        history = user_data.get("history", []).copy()
+        last_input = user_data.get("last_input", "").strip()
+
+    if not history:
+        await update.effective_message.reply_text("⚠️ Нечего продолжать.")
+        return
+
+    # 3) Make full prompt
+    user_role = world.get("user_role", "")
+    world_prompt = world.get("system_prompt", "")
+    base = f"{world_prompt}\nПользователь — {user_role}.\n{char['prompt']}\n"
+    user_name = world.get("user_name", "Пользователь")
+    name = char["name"]
+
+    if bot_state.get_user_service_config(user_id).get("chatml", False):
+        prompt = build_chatml_prompt_no_tail(world_prompt, history, user_name, name)
+    else:
+        prompt = build_plain_prompt_no_tail(base, history)
+
+    # 4) Helper function to send the prompt and get the response
+    await _generate_and_send(
+        update, context,
+        user_id=user_id,
+        scenario_file=scenario_file,
+        prompt=prompt,
+        last_input=last_input,
+        current_char=name,
+        char_emoji=char.get("emoji", "🤖")
+    )
+
 
 
 
@@ -434,7 +642,8 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if error:
         await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
-
+    user_name = world.get("user_name", "Пользователь")
+    name = char["name"]
     lock = bot_state.get_user_lock(user_id)
     async with lock:
 
@@ -444,14 +653,11 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text("❗ Нет сообщения для редактирования.")
             return
 
-        char_name = char["name"]
-
-        if bot_state.is_valid_last_exchange(user_id, scenario_file):
+        if bot_state.is_valid_last_exchange(user_id, scenario_file, name, user_name):
             history_cut = user_data["history"][:-2]
             bot_state.update_user_history(user_id, scenario_file, history_cut, last_input=user_data["last_input"])
             save_history()
-            if bot_state.debug_mode:
-                print(f"✂️ История пользователя {user_id} обрезана на 2 сообщения (edit)")
+
         else:
             await update.effective_message.reply_text("⚠️ Нельзя отредактировать последнее сообщение: структура не совпадает.")
             return
@@ -485,6 +691,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Getting characters and emoji for the user
     characters, world = load_characters(os.path.join(SCENARIOS_DIR, scenario_file))
     user_emoji = world.get("user_emoji", "🧑")
+    user_name = world.get("user_name", "Пользователь")
 
     # Formatting history
     formatted_lines = []
@@ -492,8 +699,8 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if line.startswith("Narrator:"):
             text = line[len("Narrator:"):].strip()
             formatted_lines.append(f"📜: {text}")
-        elif line.startswith(f"{user_emoji}:"):
-            text = line[len(f"{user_emoji}:"):].strip()
+        elif line.startswith(f"{user_name}:"):
+            text = line[len(f"{user_name}:"):].strip()
             formatted_lines.append(f"{user_emoji}: {text}")
         else:
             # Checking if the line starts with a character name
@@ -518,7 +725,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for chunk in chunks:
         formatted_chunk = safe_markdown_v2(chunk)
-        await safe_send_markdown(update, formatted_chunk, chunk)
+        await _safe_send_markdown(update, formatted_chunk, chunk)
 
 
 
@@ -528,14 +735,9 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
 
-    role_entry = bot_state.get_user_role(user_id)
-    if not role_entry:
-        await update.message.reply_text("❗ Сначала выбери сценарий и роль: /scenario → /role")
-        return
-
-    scenario_file = role_entry.get("scenario")
-    if not scenario_file:
-        await update.message.reply_text("❗ У тебя не выбран сценарий. Напиши /scenario.")
+    char, _, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
+    if error:
+        await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
 
     # Reset history for the user in the current scenario
@@ -549,7 +751,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
     await update.message.reply_text(
-        "🔁 История очищена! Ты можешь начать диалог заново с текущим персонажем ✨\n\n"
+        f"🔁 История очищена! Ты можешь начать диалог заново с {char["name"]}\n\n"
     )
 
     # If intro_scene exists, load it and send to the user
@@ -566,7 +768,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 bot_state.update_user_history(user_id, scenario_file, user_data["history"])
                 save_history()
                 formatted_intro = safe_markdown_v2(intro_scene)
-                await safe_send_markdown(update, formatted_intro, intro_scene)
+                await _safe_send_markdown(update, formatted_intro, intro_scene)
         except Exception as e:
             if bot_state.debug_mode:
                 print(f"⚠️ Не удалось загрузить intro_scene после reset: {e}")
@@ -683,8 +885,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     user_obj = update.effective_user
     user_id = str(user_obj.id)
-    username = user_obj.username or ""
-    full_name = user_obj.full_name or ""
+    username_obj = user_obj.username or ""
+    full_name_obj = user_obj.full_name or ""
 
     # Getting character and world info
     char, world, characters, scenario_file, error = bot_state.get_user_character_and_world(user_id)
@@ -702,16 +904,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         role_key,
         "user",
         user_input,
-        username,
-        full_name,
+        username_obj,
+        full_name_obj,
         scenario_file=scenario_file,
         world_name=world.get("name", "")
     )
 
     # Tokenization and prompt preparation
     user_role_description = world.get("user_role", "")
+    user_name = world.get("user_name", "Пользователь")
     world_prompt = world.get("system_prompt", "")
-    base_prompt = f"{world_prompt}\nПользователь — {user_role_description}.\n{char['prompt']}\n"
+    base_prompt = f"{world_prompt}\n{user_name} — {user_role_description}.\n{char['prompt']}\n"
 
     service_config = bot_state.get_user_service_config(user_id)
     if service_config is None:
@@ -731,8 +934,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         trimmed_history, tokens_used = smart_trim_history(history, encoding,
                                                         max_tokens - tokens_used)
 
-        user_emoji = world.get("user_emoji", "🧑")
-        user_message = f"{user_emoji}: {user_input}"
+        user_message = f"{user_name}: {user_input}"
         user_message_tokens = len(encoding.encode(user_message + "\n"))
 
         # Adding user message to trimmed history if it fits
@@ -757,13 +959,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         # ChatML-prompt
         system_text = (
             f"{world_prompt.strip()}\n"
-            f"Пользователь — {user_role_description.strip()}.\n"
+            f"Пользователь — {user_name}, {user_role_description.strip()}.\n"
             f"{char['prompt'].strip()}\n"
             f"Если пользователь пишет *в звёздочках* — это действие.\n"
             f"Реагируй на поведение, не повторяя его в ответ.\n"
             f"Отвечай кратко, по делу. Пиши как в визуальной новелле: короткие реплики, меньше описаний."
         )
-        prompt = build_chatml_prompt(system_text, trimmed_history, user_emoji, char["name"])
+        prompt = build_chatml_prompt(system_text, trimmed_history, user_name, char["name"])
 
     else:
         # Plain text prompt
@@ -772,11 +974,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     thinking_message = None
 
     stop_typing = asyncio.Event()
-    typing_task = asyncio.create_task(show_typing_animation(context, update.effective_chat.id, stop_typing))
+    typing_task = asyncio.create_task(_show_typing_animation(context, update.effective_chat.id, stop_typing))
 
+    emoji = char.get("emoji", "")
     try:
-        emoji = char.get("emoji", "")
-        
         service_config = bot_state.get_user_service_config(user_id)
         service_type = service_config.get("type")
         match service_type:
@@ -826,8 +1027,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
                 role_key,
                 "assistant",
                 reply,
-                username,
-                full_name,
+                username_obj,
+                full_name_obj,
                 scenario_file=scenario_file,
                 world_name=world.get("name", "")
             )
@@ -846,14 +1047,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
                 if bot_state.debug_mode:
                     print(f"⚠️ Не удалось удалить сообщение: {e}")
 
-    # ⛔ If reply is empty or None, show an error message
-    if not reply.strip():
-        reply = "⚠️ Ошибка: пустой ответ от модели или переводчика. Попробуй ещё раз."
-        if bot_state.debug_mode:
-            print("⚠️ [Debug] Пустой ответ — заменён на предупреждение.")
-    else:
-        emoji = char.get("emoji", "")
-        reply = f"{emoji} {reply}".strip()
+
+
+    reply = f"{emoji}: {reply}".strip()
 
     formatted_reply = safe_markdown_v2(reply)
     buttons = [[
@@ -861,7 +1057,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         InlineKeyboardButton("⏭ Продолжить", callback_data="continue_reply"),
         InlineKeyboardButton("✂️ Изменить", callback_data="cb_edit")
     ]]
-    bot_msg = await safe_send_markdown(update, formatted_reply, reply, buttons)
+    bot_msg = await _safe_send_markdown(update, formatted_reply, reply, buttons)
 
     async with lock:
         bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_bot_id=bot_msg.message_id)
@@ -876,7 +1072,6 @@ async def handle_force_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Chande the last message to the new one
         update.message.text = update.message.text
         await handle_message(update, context)
-
 
 
 
@@ -927,7 +1122,8 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_role = world.get("user_role", "")
         user_emoji = world.get("user_emoji", "👤")
-        user_role_line = f"\n🎭 *Ты в этом мире:* {user_emoji} _{user_role}_" if user_role else ""
+        user_name = world.get("user_name", "Пользователь")
+        user_role_line = f"\n🎭 *Ты в этом мире:* {user_emoji} {user_name}, _{user_role}_" if user_role else ""
 
         await query.edit_message_text(
             f"🎮 Сценарий *{world.get('name', selected_file)}* загружен! {world.get('emoji', '')}\n"
@@ -952,27 +1148,26 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 bot_state.update_user_history(user_id, selected_file, user_data["history"])
                 save_history()
                 formatted_intro = safe_markdown_v2(intro_scene)
-                await safe_send_markdown(update, formatted_intro, intro_scene)
+                await _safe_send_markdown(update, formatted_intro, intro_scene)
         
             # If history is not empty — show last two messages
             elif user_data["history"]:
                 recent_messages = user_data["history"][-2:]
-                user_emoji = world.get("user_emoji", "🧑")
 
                 for line in recent_messages:
                     if line.startswith("Narrator:"):
                         text = line[len("Narrator:"):].strip()
-                        formatted =f"📜 {text}"
-                    elif line.startswith(f"{user_emoji}:"):
-                        text = line[len(f"{user_emoji}:"):].strip()
-                        formatted = f"{user_emoji} {text}"
+                        formatted =f"📜: {text}"
+                    elif line.startswith(f"{user_name}:"):
+                        text = line[len(f"{user_name}:"):].strip()
+                        formatted = f"{user_emoji}: {text}"
                     else:
                         # Checking every character for a match
                         found = False
                         for _, char_data in characters.items():
                             if line.startswith(f"{char_data['name']}:"):
                                 text = line[len(f"{char_data['name']}:"):].strip()
-                                formatted = f"{char_data.get('emoji', '🤖')} {text}"
+                                formatted = f"{char_data.get('emoji', '🤖')}: {text}"
                                 found = True
                                 break
                         
@@ -980,7 +1175,7 @@ async def scenario_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             formatted = line
                     
                 markdown_formatted = safe_markdown_v2(formatted)
-                await safe_send_markdown(update, markdown_formatted, formatted)
+                await _safe_send_markdown(update, markdown_formatted, formatted)
 
     except Exception as e:
         await query.edit_message_text(f"⚠️ Ошибка при загрузке сценария: {e}")
@@ -1086,7 +1281,6 @@ async def continue_reply_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 
-
 # retry_callback handler
 async def retry_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query: CallbackQuery = update.callback_query
@@ -1094,6 +1288,7 @@ async def retry_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     # /retry command is called from the callback
     await retry_command(update, context)
     
+
 
 
 # edit_callback handler

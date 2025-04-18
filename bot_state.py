@@ -128,14 +128,14 @@ class BotState:
             data["last_bot_id"] = last_bot_id
         self.user_history[str(user_id)][scenario_file] = data
 
-
+    """
     def cut_last_exchange(self, user_id, scenario_file):
         data = self.get_user_history(user_id, scenario_file)
         if len(data["history"]) >= 2:
             data["history"] = data["history"][:-2]
             return True
         return False
-
+    """
 
     # Logging user interactions
     def append_to_archive_user(self,
@@ -181,14 +181,17 @@ class BotState:
     
 
     # === LAST PAIR VALIDATION ===
-    def is_valid_last_exchange(self, user_id, scenario_file):
+    def is_valid_last_exchange(self, user_id, scenario_file, char_name, user_name):
         data = self.get_user_history(user_id, scenario_file)
         history = data.get("history", [])
+        user_prefix = f"{user_name}:"
+        assistant_prefix = f"{char_name}:"
 
-        if len(history) >= 2:
-            if data.get("last_input") and data.get("last_bot_id") is not None:
-                return True
-        return False
+        if len(history) < 2:
+            return False
+
+        return history[-2].startswith(user_prefix) and history[-1].startswith(assistant_prefix)
+
 
 
     ## === STRINGS ===

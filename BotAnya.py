@@ -9,6 +9,7 @@
 import asyncio
 import contextlib
 from telegram.ext import ApplicationBuilder
+from telegram.request import HTTPXRequest
 from bot_state import bot_state, init_config, load_roles, save_roles, load_history, save_history
 from telegram_handlers import register_handlers, get_bot_commands
 
@@ -26,7 +27,12 @@ async def main():
     load_roles()
     load_history()
 
-    app = ApplicationBuilder().concurrent_updates(True).token(bot_state.bot_token).build()
+    # 👇 Настраиваем кастомные таймауты
+    request = HTTPXRequest(
+        connect_timeout=10.0,  # подключение
+        read_timeout=20.0      # ожидание ответа
+    )
+    app = ApplicationBuilder().concurrent_updates(True).token(bot_state.bot_token).request(request).build()
 
     # Handlers
     # Registering handlers for different commands and messages
