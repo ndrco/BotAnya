@@ -1,170 +1,151 @@
-# 🧠 BotAnya — ролевая няша-ботик для Telegram
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**BotAnya** — это Telegram-бот с поддержкой ролевых миров, многоперсонажного общения, генерации сцен и переводов. Работает с локальными моделями через **Ollama**, а также с облачным API **GigaChat**. Поддерживает **ChatML**, команды в стиле SillyTavern, кастомные JSON-сценарии и память.
+# BotAnya — Telegram Role-Playing Bot
 
----
+BotAnya is a Telegram bot for immersive role-playing with support for multiple worlds, characters, scene generation, and translation. It uses local models via Ollama and remote API through GigaChat. It supports ChatML, custom JSON scenarios, history management, and logging.
 
-## ✨ Возможности
+## Features
 
-- 🌍 Поддержка нескольких миров и ролей (JSON-сценарии)
-- 🧙 Многоперсонажный режим с выбором собеседника
-- 🤖 Поддержка моделей через **Ollama**, **GigaChat**
-- 🧠 Переключение "думателя" командой `/service`
-- 🔄 Команды для перегенерации и редактирования: `/retry`, `/edit`
-- 🌐 Перевод сообщений: автоматически на английский перед отправкой и обратно на русский после
-- 🗣️ Поддержка ChatML-формата
-- 💾 Сохранение истории и логов
-- ✨ Генерация атмосферных сцен `/scene`
-- ✍️ Поддержка `*звёздочек*`, MarkdownV2
-- 📦 Логирование общения в JSONL
+- Multiple worlds and roles via JSON scenarios.
+- Multi-character mode with dynamic character selection.
+- Support for models through Ollama and GigaChat.
+- ChatML and plain-text message formats.
+- Commands for retry, edit, continue, and history control.
+- Automatic translation (RU ↔ EN).
+- Persistent history and JSONL logs.
+- Atmospheric scene generation via `/scene`.
+- Safe MarkdownV2 formatting for messages.
 
----
+## Installation
 
-## 🚀 Установка
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Install and configure Ollama, then pull the required model:
+   ```bash
+   ollama pull llama3.2
+   ```
+3. Create configuration files based on the provided examples:
+   - `config.json` in the project root.
+   - `secrets/credentials.json` from `credentials_example.json`.
+4. Prepare directories:
+   ```plaintext
+   /scenarios/           — JSON scenario files (*.json)
+   /secrets/             — contains credentials.json
+   /history.json         — auto-generated conversation history
+   /user_roles.json      — auto-generated user roles and settings
+   /chat_logs/           — JSONL logs of interactions
+   ```
+5. Run the bot:
+   ```bash
+   python BotAnya.py
+   ```
 
-1. Установи зависимости:
-```bash
-pip install -r requirements.txt
-```
+## `config.json` Structure
 
-2. Установи [Ollama](https://ollama.com) и загрузите модель:
-```bash
-ollama pull pocketdoc/dans-personalityengine
-```
+`config.json` defines the bot’s behavior and service endpoints. It contains the following top-level keys:
 
-3. Создай `config.json` и `credentials.json` на основе примеров:
-```
-/config.json
-/secrets/credentials_example.json → /secrets/credentials.json
-```
+- `default_service` (string): Key of the service used by default when starting the bot.
+- `debug_mode` (boolean): If `true`, enables verbose debug output in logs and console.
+- `credentials_path` (string): File path to the OAuth or API credentials JSON.
+- `services` (object): A mapping of service keys to service configuration objects.
 
-4. Подготовь директории:
-```
-/scenarios/           — сценарии миров (*.json)
-/history.json         — создаётся автоматически
-/user_roles.json      — создаётся автоматически
-/chat_logs/           — папка для логов
-/secrets/             — содержит credentials.json с OAuth-ключами
-```
+### Service Configuration Object
 
-5. Запусти бота:
-```bash
-python BotAnya.py
-```
+Each entry under `services` must include the following fields:
 
----
+| Key                | Type      | Description                                                                                  |
+|--------------------|-----------|----------------------------------------------------------------------------------------------|
+| `name`             | string    | Human-readable identifier for the service.                                                   |
+| `type`             | string    | Service type (`ollama` or `gigachat`).                                                       |
+| `model`            | string    | Model identifier or name used by the service.                                                |
+| `url`              | string    | API endpoint for generating completions.                                                     |
+| `auth_url`         | string    | OAuth token endpoint (required for Gigachat).                                               |
+| `scope`            | string    | OAuth scope for token requests (Gigachat).                                                  |
+| `temperature`      | number    | Sampling temperature for token generation.                                                  |
+| `top_p`            | number    | Nucleus sampling threshold (total probability mass).                                        |
+| `min_p`            | number    | Minimum probability filter for tokens (optional).                                           |
+| `num_predict`      | integer   | Maximum number of tokens to generate in a single request.                                   |
+| `max_tokens`       | integer   | Maximum number of context tokens allowed in the prompt.                                     |
+| `stop`             | array     | List of stop sequences that signal the model to stop generation.                            |
+| `repeat_penalty`   | number    | Penalty factor applied to repeated tokens.                                                  |
+| `frequency_penalty`| number    | Penalty based on token frequency to reduce repetition.                                      |
+| `presence_penalty` | number    | Penalty for new token presence to encourage topic variation.                                 |
+| `chatml`           | boolean   | Whether to format prompts using ChatML (`true`) or plain text (`false`).                    |
+| `timeout`          | integer   | HTTP request timeout in seconds (optional; default may apply).                              |
 
-## ⚙️ Пример структуры `config.json`
+## Bot Commands
 
-```json
-{
-  "default_service": "ollama",
-  "debug_mode": true,
-  "credentials_path": "secrets/credentials.json",
-  "services": {
-    "ollama": {
-      "name": "Ollama LLM",
-      "type": "ollama",
-      "url": "http://localhost:11434/api/generate",
-      "model": "PocketDoc_Dans-PersonalityEngine:latest",
-      "chatml": true,
-      "temperature": 1.0,
-      "top_p": 0.95,
-      "min_p": 0.05,
-      "repeat_penalty": 1.1,
-      "max_tokens": 7000,
-      "num_predict": 2048,
-      "stop": ["User:"],
-      "timeout": 240,
-      "tiktoken_encoding": "gpt2"
-    },
-    "gigachat": {
-      "name": "GigaChat API",
-      "type": "gigachat",
-      "model": "GigaChat-Pro",
-      "url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
-      "auth_url": "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-      "scope": "GIGACHAT_API_PERS",
-      "chatml": true,
-      "temperature": 0.9,
-      "top_p": 0.95,
-      "num_predict": 1024,
-      "repeat_penalty": 1.1,
-      "timeout": 100
-    }
-  }
-}
-```
+| Command      | Description                                                 |
+|--------------|-------------------------------------------------------------|
+| `/start`     | Initialize or resume the dialogue.                          |
+| `/scenario`  | Select a world scenario.                                    |
+| `/role`      | Select a character role.                                    |
+| `/scene`     | Generate an atmospheric scene.                              |
+| `/whoami`    | Display current world, character, and service information.  |
+| `/service`   | Switch the LLM service.                |
+| `/lang`      | Toggle automatic translation (RU ↔ EN).                     |
+| `/retry`     | Regenerate the last bot response.                           |
+| `/continue`  | Continue the last response thread.                          |
+| `/edit`      | Edit your last message before sending to the model.         |
+| `/history`   | View the conversation history.                              |
+| `/reset`     | Clear the history and restart the scenario.                 |
+| `/help`      | Show help information, including available roles.           |
 
----
+## JSON Scenario Format
 
-## 💬 Команды бота
-
-| Команда       | Описание |
-|---------------|----------|
-| `/start`      | Начать общение |
-| `/scenario`   | Выбрать мир |
-| `/role`       | Выбрать персонажа |
-| `/scene`      | Сгенерировать сюжетную сцену |
-| `/whoami`     | Посмотреть, кто ты в этом мире |
-| `/service`    | Выбрать движок (Ollama/GigaChat) |
-| `/lang`       | Переключить переводчик EN/RU |
-| `/retry`      | Перегенерировать последний ответ |
-| `/edit`       | Отредактировать своё сообщение |
-| `/history`    | Посмотреть текущую историю |
-| `/reset`      | Сбросить историю и начать сначала |
-| `/help`       | Подсказка по командам |
-
----
-
-## 📖 Пример сценария (JSON)
-
+Example scenario file (`.json`):
 ```json
 {
   "world": {
-    "name": "Школа неко-девочек",
-    "description": "Милый мир с ушками и приключениями",
-    "emoji": "🏫",
-    "intro_scene": "Ты входишь в уютный класс, где за партами сидят неко-девочки.",
-    "system_prompt": "...",
+    "name": "Example World",
+    "description": "A brief description of the setting.",
+    "emoji": "🌍",
+    "intro_scene": "Initial scene description.",
+    "system_prompt": "System-level instructions for the scenario.",
     "user_emoji": "😺",
-    "user_role": "Ученик в школе неко-девочек"
+    "user_role": "Adventurer"
   },
   "characters": {
     "luna": {
-      "name": "Луна",
+      "name": "Luna",
       "emoji": "🌙",
-      "prompt": "Ты милая застенчивая неко-девочка...",
-      "description": "застенчивая кошечка"
+      "description": "Shy cat-eared girl.",
+      "prompt": "You are a shy neko girl..."
     }
   }
 }
 ```
 
----
+## Translation and ChatML
 
-## 🌐 Перевод и ChatML
+Enable translation by toggling `/lang`. When enabled, prompts are translated _to_ English before sending and _back_ to Russian upon receipt.
 
-- Перевод включается флагом `use_translation=true` — при этом **всё сообщение переводится на английский перед отправкой и обратно на русский после ответа**.
-- Поддерживается формат **ChatML**: `<|im_start|>user`, `<|im_start|>assistant`, `<|im_start|>system` и др.
+Use ChatML tags `<|im_start|>` and `<|im_end|>` to structure system, user, and assistant messages when `chatml` is set to `true`.
 
----
+## Project Structure
 
-## 📦 Хранилище и структура проекта
+```
+BotAnya.py              — Entry point for the bot
+config.json             — Configuration for services and settings
+secrets/credentials.json— OAuth/API credentials for services
+utils.py                — Utility modules (Markdown escape, prompt builders)
+config.py               — Path and constant definitions
+bot_state.py            — State management and persistence
+gigachat_client.py      — Sber GigaChat integration
+ollama_client.py        — Ollama integration
+telegram_handlers.py    — Command and message handlers
+translate_utils.py      — Automatic translation helpers
+README.md               — Project documentation
+scenarios/              — JSON world and character files
+history.json            — Conversation history (generated)
+user_roles.json         — User roles and settings (generated)
+chat_logs/              — JSONL files with interaction logs
+```
 
-| Файл/Папка           | Назначение |
-|----------------------|------------|
-| `config.json`        | Конфигурация сервисов и параметров |
-| `secrets/`           | Папка с OAuth-ключами (`credentials.json`) |
-| `user_roles.json`    | Текущие роли пользователей |
-| `history.json`       | История по пользователю и сценарию |
-| `scenarios/*.json`   | Сценарии миров и персонажей |
-| `chat_logs/*.jsonl`  | Логи общения (архив) |
+## License
 
----
+This project is licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
 
-## ❤️ Автор
-
-Создан с любовью для уютных и глубоких ролевых диалогов 🥰 
-Подходит для фанатов визуальных новелл, кастомных вселенных и GPT-приключений в Telegram!
 

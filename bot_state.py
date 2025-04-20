@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 NDRco
+# Licensed under the MIT License. See LICENSE file in the project root for full license information.
+
 # bot_state.py
 # This file is part of the BotAnya Telegram Bot project.
 
@@ -22,6 +26,9 @@ class BotState:
         self.bot_token = ""
         self.user_locks = {}
         self.encoding = None
+        self.pending_messages = {}  # user_id -> list of (text, original_text, buttons)
+
+        self.test_network_fail_once = True  # или True для одного запуска
 
 
 
@@ -130,14 +137,7 @@ class BotState:
             data["last_bot_id"] = last_bot_id
         self.user_history[str(user_id)][scenario_file] = data
 
-    """
-    def cut_last_exchange(self, user_id, scenario_file):
-        data = self.get_user_history(user_id, scenario_file)
-        if len(data["history"]) >= 2:
-            data["history"] = data["history"][:-2]
-            return True
-        return False
-    """
+
 
     # Logging user interactions
     def append_to_archive_user(self,
@@ -150,7 +150,6 @@ class BotState:
         scenario_file: str = "",
         world_name: str = ""
     ):
-
         if not os.path.exists(LOG_DIR):
             os.makedirs(LOG_DIR)
 
@@ -173,6 +172,36 @@ class BotState:
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
 
+
+    # Logging bot interactions
+    def append_to_archive_bot(self,
+        user_id: str,
+        service_type: str,
+        service_model: str,
+        language: str,
+        character: str,
+        text: str
+    ):
+        if not os.path.exists(LOG_DIR):
+            os.makedirs(LOG_DIR)
+
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        file_path = os.path.join(LOG_DIR, f"{user_id}_{date_str}.jsonl")
+
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "user_id": user_id,
+            "service_type": service_type,
+            "service_model": service_model,
+            "language": language,
+            "character": character,
+            "text": text
+        }
+
+        with open(file_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")            
+
+
     # === WORLD_INFO ===
     def set_world_info(self, user_id, world_data):
         self.user_world_info[str(user_id)] = world_data
@@ -193,7 +222,6 @@ class BotState:
             return False
 
         return history[-2].startswith(user_prefix) and history[-1].startswith(assistant_prefix)
-
 
 
     ## === STRINGS ===
@@ -251,7 +279,6 @@ def load_config():
 
     return data, credentials
 
-          
 
 
 

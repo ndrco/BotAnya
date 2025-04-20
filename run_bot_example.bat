@@ -11,7 +11,7 @@ if errorlevel 1 (
     echo Ollama running allready.
 )
 
-echo BotAnya starting...
+echo BotAnya starting
 python BotAnya.py
 
 echo BotAnya stoped

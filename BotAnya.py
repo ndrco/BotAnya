@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 NDRco
+# Licensed under the MIT License. See LICENSE file in the project root for full license information.
+
 # BotAnya.py
 # main file for the BotAnya Telegram Bot project
 # This is a simple Telegram bot
@@ -51,7 +55,7 @@ async def main():
         print("🔚 Завершение работы.")
     app.post_shutdown = shutdown_callback
 
-    print("🚀 Запуск бота...")
+    print("Запуск бота...")
     if bot_state.debug_mode:
         print(bot_state)
 
@@ -62,7 +66,8 @@ async def main():
     # Polling
     # This is the main loop that checks for new messages and updates
     polling_task = asyncio.create_task(app.updater.start_polling())
-
+    print("Бот запущен 🚀")
+    
     # Waiting for the bot to be stopped
     # This is a future that never completes, so the bot will run indefinitely
     try:

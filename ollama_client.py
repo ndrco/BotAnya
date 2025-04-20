@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 NDRco
+# Licensed under the MIT License. See LICENSE file in the project root for full license information.
+
 # ollama_client.py
 # This file is part of the BotAnya Telegram Bot project.
 
@@ -14,15 +18,15 @@ ollama_waiting = []
 async def send_prompt_to_ollama(user_id: str, prompt: str, bot_state, use_translation: bool = False,
                            translate_func=None, reverse_translate_func=None, get_position_only: bool = False) -> str:
     """
-    Отправляет prompt на сервер Ollama и возвращает ответ.
+    Sends a prompt to the Ollama server and returns the response.
 
-    :param prompt: Исходный prompt для модели.
-    :param bot_state: Объект с настройками, содержит свойства модели, температуру и пр.
-    :param use_translation: Флаг, если True, будет выполнять перевод prompt перед отправкой и ответа после.
-    :param translate_func: Функция для перевода prompt на английский.
-    :param reverse_translate_func: Функция для обратного перевода ответа.
-    :param get_position_only: Флаг, если True, возвращает только позицию в очереди.
-    :return: Строка с ответом от модели, позиция в очереди (если используется семафор).
+    :param prompt: The original prompt for the model.
+    :param bot_state: Object containing configuration settings such as model type, temperature, etc.
+    :param use_translation: If True, translates the prompt to English before sending and the response back to Russian after.
+    :param translate_func: Function to translate the prompt to English.
+    :param reverse_translate_func: Function to translate the response back.
+    :param get_position_only: If True, returns only the queue position.
+    :return: The response string from the model, and the queue position (if semaphore is used).
     """
     
     # Getting user service configuration

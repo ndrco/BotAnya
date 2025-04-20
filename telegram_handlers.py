@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 NDRco
+# Licensed under the MIT License. See LICENSE file in the project root for full license information.
+
 # telegram_handlers.py
 # This file is part of the BotAnya Telegram Bot project.
 
@@ -73,7 +77,7 @@ def get_bot_commands():
 
 
 
-# Function to show typing animation
+# Show typing animation
 async def _show_typing_animation(context, chat_id, stop_event):
     while not stop_event.is_set():
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
@@ -82,7 +86,7 @@ async def _show_typing_animation(context, chat_id, stop_event):
 
 
 
-# Function to send a message with MarkdownV2 formatting
+# Sending a message with MarkdownV2 formatting
 async def _safe_send_markdown(update, text: str, original_text: str = None, buttons: list = None) -> Message:
     """
         Safely sends a message with MarkdownV2. If formatting fails, retry without it.
@@ -100,7 +104,7 @@ async def _safe_send_markdown(update, text: str, original_text: str = None, butt
         return await effective_message.reply_text("⚠️ Думатель ничего не ответил ☹️. Попробуй ещё раз.")
     
     try:
-        # первый заход — с MarkdownV2
+        # MarkdownV2
         return await effective_message.reply_text(
             text,
             parse_mode="MarkdownV2",
@@ -116,7 +120,7 @@ async def _safe_send_markdown(update, text: str, original_text: str = None, butt
                 original_text or text,
                 reply_markup=reply_markup
             )
-        # else  try to send as plain text and log the error
+        # else try to send as plain text and log the error
         if bot_state.debug_mode:
             print(f"⚠️ BadRequest (non‑entities): {msg}\n→ отправляем plain text")
         return await effective_message.reply_text(
@@ -147,7 +151,7 @@ async def _generate_and_send(
     char_emoji: str
 ):
     """
-    Helper function to generate and send a message.: 
+    Helper function to generate and send a message: 
         - waits in queue,
         - shows "prints",
         - sends prompt to model,
@@ -157,7 +161,9 @@ async def _generate_and_send(
     """
     # service selection
     service_config = bot_state.get_user_service_config(user_id)
-    match service_config.get("type"):
+    service_type = service_config.get("type", "неизвестно")
+    service_model = service_config.get("model", "неизвестно")
+    match service_type:
         case "ollama":
             send_func = send_prompt_to_ollama
         case "gigachat":
@@ -212,7 +218,11 @@ async def _generate_and_send(
     ]]
     bot_msg = await _safe_send_markdown(update, formatted, display, buttons)
 
-    # saving history
+    # saving history and logging
+    role_entry = bot_state.get_user_role(user_id)
+    use_translation = role_entry.get("use_translation", False)
+    lang = "EN" if use_translation else "RU"
+
     lock = bot_state.get_user_lock(user_id)
     async with lock:
         data = bot_state.get_user_history(user_id, scenario_file)
@@ -222,6 +232,16 @@ async def _generate_and_send(
             last_input=last_input, last_bot_id=bot_msg.message_id
         )
         save_history()
+
+        # Logging bot answer
+        bot_state.append_to_archive_bot(
+            user_id,
+            service_type,
+            service_model,
+            lang,
+            current_char,
+            reply
+        )    
 
 
 
@@ -343,7 +363,6 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-
 # /scene handler
 async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -359,11 +378,8 @@ async def scene_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_emoji = world.get("user_emoji", "👤")
     user_name = world.get("user_name", "Пользователь")
 
-    # Получаем последние строки из истории
-    lock = bot_state.get_user_lock(user_id)
-    async with lock:
-        user_data = bot_state.get_user_history(user_id, scenario_file)
-        recent_history = user_data.get("history", [])[-5:]  # last 5 messages
+    user_data = bot_state.get_user_history(user_id, scenario_file)
+    recent_history = user_data.get("history", [])[-5:]  # last 5 messages
 
     # Base prompt
     base_prompt = build_scene_prompt(world_prompt, char, user_emoji, user_name, user_role, recent_history)
@@ -482,11 +498,11 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             do_continue = True
 
-        # char retry 
+        # if this is a normal flow of messages
         elif last.startswith(f"{name}:"):
             history.pop()  # delete the bot message
-            bot_state.update_user_history(user_id, scenario_file, history, last_input=last_input)
-            save_history()            
+            if history:
+                history.pop()  # delete the user message
             try:
                 await context.bot.delete_message(update.effective_chat.id, last_bot_id)
             except:
@@ -500,31 +516,7 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await continue_command(update, context)
     if do_scene:
         return await scene_command(update, context)
-
-    # ordinary retry
-    base = f"{world.get('system_prompt')}\n{user_name} — {world.get('user_role')}.\n{char['prompt']}\n"
-    hist_for_prompt = history.copy()
-    
-    # Если сообщение пользователя было удалено, то добавляем его обратно один раз
-    #if last_input and (not history or history[-1] != f"{user_name}: {last_input}"):
-    #    hist_for_prompt.append(f"{user_name}: {last_input}")
-
-    if bot_state.get_user_service_config(user_id).get("chatml", False):
-        prompt = build_chatml_prompt_no_tail(world.get("system_prompt"), hist_for_prompt, user_name, name)
-    else:
-        prompt = build_plain_prompt_no_tail(base, hist_for_prompt)
-
-    await update.effective_message.reply_text("🔁 Перегенерирую последний ответ…")
-
-    await _generate_and_send(
-        update, context,
-        user_id=user_id,
-        scenario_file=scenario_file,
-        prompt=prompt,
-        last_input=last_input,
-        current_char=name,
-        char_emoji=char.get("emoji", "🤖")
-    )
+    return await handle_message(update, context, override_input=last_input)
 
 
 
@@ -534,34 +526,53 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def continue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
 
-    # 1) Check if user has a character and world
+    # Check if user has a character and world
     char, world, _, scenario_file, error = bot_state.get_user_character_and_world(user_id)
     if error:
         await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
 
-    # 2) History and last input
-    lock = bot_state.get_user_lock(user_id)
-    async with lock:
-        user_data = bot_state.get_user_history(user_id, scenario_file)
-        history = user_data.get("history", []).copy()
-        last_input = user_data.get("last_input", "").strip()
-
+    # History and last input
+    user_data = bot_state.get_user_history(user_id, scenario_file)
+    history = user_data["history"]
     if not history:
         await update.effective_message.reply_text("⚠️ Нечего продолжать.")
+        return    
+
+    # If was Narrator scene
+    if history[-1].startswith("Narrator:"):
+        return await scene_command(update, context)
+
+
+    service_config = bot_state.get_user_service_config(user_id)
+    user_role_description = world.get("user_role", "")
+    user_name = world.get("user_name", "Пользователь")
+    user_emoji = world.get("user_emoji", "🧑")
+    world_prompt = world.get("system_prompt", "")
+
+
+    if service_config is None:
+        await update.effective_message.reply_text("⚠️ Ошибка: выбранный думатель не найден. Попробуй /service.")
         return
+   
+    base_prompt = build_system_prompt(world_prompt, char, user_emoji, user_name, user_role_description)
+    tokens_used = len(bot_state.encoding.encode(base_prompt))
+    
+    max_tokens = service_config.get("max_tokens", 7000)
+    trimmed_history, tokens_used = smart_trim_history(history, bot_state.encoding,
+                                                    max_tokens - tokens_used)
+    if bot_state.debug_mode:
+        print(f"\n📊 [Debug] Токенов в prompt: {tokens_used} / {max_tokens}\n")
 
     # 3) Make full prompt
-    user_role = world.get("user_role", "")
-    world_prompt = world.get("system_prompt", "")
-    base = f"{world_prompt}\nПользователь — {user_role}.\n{char['prompt']}\n"
-    user_name = world.get("user_name", "Пользователь")
-    name = char["name"]
+    if service_config.get("chatml", False):
+        # ChatML-prompt
+        prompt = build_chatml_prompt_no_tail(base_prompt, trimmed_history, user_name, char["name"])
 
-    if bot_state.get_user_service_config(user_id).get("chatml", False):
-        prompt = build_chatml_prompt_no_tail(world_prompt, history, user_name, name)
     else:
-        prompt = build_plain_prompt_no_tail(base, history)
+        # Plain text prompt
+        prompt = build_plain_prompt_no_tail(base_prompt, trimmed_history)
+
 
     # 4) Helper function to send the prompt and get the response
     await _generate_and_send(
@@ -569,11 +580,11 @@ async def continue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id=user_id,
         scenario_file=scenario_file,
         prompt=prompt,
-        last_input=last_input,
-        current_char=name,
+        last_input=user_data.get("last_input", ""),
+        current_char=char["name"],
         char_emoji=char.get("emoji", "🤖")
     )
-
+    
 
 
 
@@ -824,10 +835,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-
-# Function to handle incoming messages
+# Handle incoming messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, override_input=None):
-    user_input = override_input or update.message.text
+    user_input = override_input or update.effective_message.text
 
     user_obj = update.effective_user
     user_id = str(user_obj.id)
@@ -837,24 +847,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     # Getting character and world info
     char, world, characters, scenario_file, error = bot_state.get_user_character_and_world(user_id)
     if error:
-        await update.message.reply_text(error, parse_mode="Markdown")
+        await update.effective_message.reply_text(error, parse_mode="Markdown")
         return
 
     role_entry = bot_state.get_user_role(user_id)
     default_role = next(iter(characters))
     role_key = role_entry.get("role") if role_entry else default_role
+    service_config = bot_state.get_user_service_config(user_id)
 
     # Logging user input
-    bot_state.append_to_archive_user(
-        user_id,
-        role_key,
-        "user",
-        user_input,
-        username_obj,
-        full_name_obj,
-        scenario_file=scenario_file,
-        world_name=world.get("name", "")
-    )
+    lock = bot_state.get_user_lock(user_id)
+    async with lock:
+        bot_state.append_to_archive_user(
+            user_id,
+            role_key,
+            "user",
+            user_input,
+            username_obj,
+            full_name_obj,
+            scenario_file=scenario_file,
+            world_name=world.get("name", ""),
+        )
 
     # Tokenization and prompt preparation
     user_role_description = world.get("user_role", "")
@@ -863,7 +876,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     world_prompt = world.get("system_prompt", "")
 
     base_prompt = build_system_prompt(world_prompt, char, user_emoji, user_name, user_role_description)
-    service_config = bot_state.get_user_service_config(user_id)
+    
     if service_config is None:
         await update.effective_message.reply_text("⚠️ Ошибка: выбранный думатель не найден. Попробуй /service.")
         return
@@ -871,7 +884,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     tokens_used = len(bot_state.encoding.encode(base_prompt))
 
     # Getting user history and trimming it if necessary
-    lock = bot_state.get_user_lock(user_id)
     async with lock:
         user_data = bot_state.get_user_history(user_id, scenario_file)
 
@@ -909,100 +921,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         char_emoji=char.get("emoji", "🤖")
     )
 
-    """
-    thinking_message = None
-
-    stop_typing = asyncio.Event()
-    typing_task = asyncio.create_task(_show_typing_animation(context, update.effective_chat.id, stop_typing))
-
-    emoji = char.get("emoji", "")
-    try:
-        service_config = bot_state.get_user_service_config(user_id)
-        service_type = service_config.get("type")
-        match service_type:
-            case "ollama":
-                send_func = send_prompt_to_ollama
-            case "gigachat":
-                send_func = send_prompt_to_gigachat
-            case _:
-                raise ValueError(f"❌ Неизвестный тип сервиса: {service_type}")
-      
-        _, my_position = await send_func(
-            user_id,
-            prompt,
-            bot_state,
-            use_translation = role_entry.get("use_translation", False),
-            translate_func = translate_prompt_to_english,
-            reverse_translate_func = translate_prompt_to_russian,
-            get_position_only = True
-        )
-
-        if my_position > 1:
-            await update.effective_message.reply_text(
-                f"⏳ Сейчас думатель занят другими... Ты — *{my_position}-й* в очереди.",
-                parse_mode="Markdown"
-            )
-
-        thinking_message = await update.effective_message.reply_text(f"{emoji} {char['name']} думает... 🤔")
-
-        reply, _ = await send_func(
-            user_id,
-            prompt,
-            bot_state,
-            use_translation = role_entry.get("use_translation", False),
-            translate_func=translate_prompt_to_english,
-            reverse_translate_func=translate_prompt_to_russian
-        )
-
-        if bot_state.debug_mode:
-            print(f"\n📊 [Debug] Токенов в prompt: {total_prompt_tokens} / {max_tokens}\n")
-
-        # History update
-        async with lock:
-            trimmed_history.append(f"{char['name']}: {reply}")
-            save_history()
-            bot_state.append_to_archive_user(
-                user_id,
-                role_key,
-                "assistant",
-                reply,
-                username_obj,
-                full_name_obj,
-                scenario_file=scenario_file,
-                world_name=world.get("name", "")
-            )
-
-    except Exception as e:
-        reply = f"Ошибка запроса к модели: {e}"
-
-    finally:
-        stop_typing.set()
-        await typing_task
-        
-        if thinking_message:
-            try:
-                await thinking_message.delete()
-            except Exception as e:
-                if bot_state.debug_mode:
-                    print(f"⚠️ Не удалось удалить сообщение: {e}")
-
-
-
-    reply = f"{emoji}: {reply}".strip()
-
-    formatted_reply = safe_markdown_v2(reply)
-    buttons = [[
-        InlineKeyboardButton("🔁 Повторить", callback_data="cb_retry"),
-        InlineKeyboardButton("⏭ Продолжить", callback_data="continue_reply"),
-        InlineKeyboardButton("✂️ Изменить", callback_data="cb_edit")
-    ]]
-    bot_msg = await _safe_send_markdown(update, formatted_reply, reply, buttons)
-
-    async with lock:
-        bot_state.update_user_history(user_id, scenario_file, trimmed_history, last_bot_id=bot_msg.message_id)
-"""
-
-
+    
 
 
 # Button handler for editting the last message

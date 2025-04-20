@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 NDRco
+# Licensed under the MIT License. See LICENSE file in the project root for full license information.
+
 # gigachat_client.py
 # This file is part of the BotAnya Telegram Bot project.
 
@@ -14,17 +18,16 @@ gigachat_waiting = []
 async def send_prompt_to_gigachat(user_id: str, prompt: str, bot_state, use_translation: bool = False,
                            translate_func=None, reverse_translate_func=None, get_position_only: bool = False) -> str:
     """
-    Отправляет prompt к API GigaChat и возвращает ответ модели.
+    Sends a prompt to the GigaChat API and returns the model's response.
 
-    :param prompt: Исходный текстовый prompt для модели.
-    :param bot_state: Объект с настройками: содержит название модели, температуру, top_p, 
-                      URL API GigaChat, время ожидания (timeout), режим отладки (debug_mode), 
-                      а также данные для OAuth авторизации (например, ключ авторизации или токен).
-    :param use_translation: Флаг, если True, будет выполнять перевод prompt перед отправкой и ответа после.
-    :param translate_func: Функция для перевода prompt на английский.
-    :param reverse_translate_func: Функция для обратного перевода ответа.
-    :param get_position_only: Флаг, если True, возвращает только позицию в очереди.
-    :return: Строка с текстовым ответом от модели GigaChat, позиция в очереди (если используется семафор).
+    :param prompt: The original text prompt for the model.
+    :param bot_state: Object containing configuration settings, including model name, temperature, top_p,
+                    GigaChat API URL, timeout value, debug mode, and OAuth credentials (e.g., auth key or token).
+    :param use_translation: If True, translates the prompt to English before sending and translates the response back after.
+    :param translate_func: Function to translate the prompt to English.
+    :param reverse_translate_func: Function to translate the response back to the original language.
+    :param get_position_only: If True, returns only the position in the queue.
+    :return: A string with the text response from the GigaChat model, and the queue position (if a semaphore is used).
     """
     
     # Getting user service configuration
