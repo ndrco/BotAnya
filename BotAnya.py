@@ -56,8 +56,6 @@ async def main():
     app.post_shutdown = shutdown_callback
 
     print("Запуск бота...")
-    if bot_state.debug_mode:
-        print(bot_state)
 
     # Initialize the bot
     await app.initialize()   # Preparing the bot (loading data, etc.)
