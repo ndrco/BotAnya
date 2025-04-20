@@ -22,7 +22,7 @@ BotAnya is a Telegram bot for immersive role-playing with support for multiple w
    ```bash
    pip install -r requirements.txt
    ```
-2. Install and configure Ollama, then pull the required model:
+2. Install and configure Ollama, then pull the required model, for example:
    ```bash
    ollama pull llama3.2
    ```
@@ -41,6 +41,7 @@ BotAnya is a Telegram bot for immersive role-playing with support for multiple w
    ```bash
    python BotAnya.py
    ```
+  You can use run_bot.bat for automatic starting ollama plus bot.
 
 ## `config.json` Structure
 
@@ -122,7 +123,7 @@ Example scenario file (`.json`):
 
 Enable translation by toggling `/lang`. When enabled, prompts are translated _to_ English before sending and _back_ to Russian upon receipt.
 
-Use ChatML tags `<|im_start|>` and `<|im_end|>` to structure system, user, and assistant messages when `chatml` is set to `true`.
+If `chatml` key in the config.json file set to `true` ChatML tags `<|im_start|>` and `<|im_end|>` will be added to structure system, user, and assistant messages when.
 
 ## Project Structure
 
