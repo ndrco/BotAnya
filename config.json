@@ -103,6 +103,7 @@
     }
   },
   "credentials_path": "secrets/credentials.json",
-  "debug_mode": false,
-  "default_service": "ollama1"
+  "debug_mode": true,
+  "default_service": "ollama1",
+  "translation_service": "google"
 }

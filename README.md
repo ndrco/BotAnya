@@ -119,11 +119,39 @@ Example scenario file (`.json`):
 }
 ```
 
-## Translation and ChatML
+## ChatML
+
+If `chatml` key in the config.json file set to `true` ChatML tags `<|im_start|>` and `<|im_end|>` will be added to structure system, user, and assistant messages when.
+
+## Translation
 
 Enable translation by toggling `/lang`. When enabled, prompts are translated _to_ English before sending and _back_ to Russian upon receipt.
 
-If `chatml` key in the config.json file set to `true` ChatML tags `<|im_start|>` and `<|im_end|>` will be added to structure system, user, and assistant messages when.
+BotAnya uses **deep_translator** under the hood and lets you choose among multiple translation engines without touching code.
+
+### 1. Choosing the engine
+
+In your **config.json**, set:
+
+```json
+"translation_service": "google"
+```
+
+### 2. Storing API keys
+
+Each translation service expects different key names. In `secrets/credentials.json`
+
+### 3. Supported engines
+
+| Key        | deep_translator class           |
+|------------|----------------------------------|
+| `google`   | `GoogleTranslator`               |
+| `deepl`    | `DeeplTranslator`                |
+| `mymemory` | `MyMemoryTranslator`             |
+| `yandex`   | `YandexTranslator`               |
+| `microsoft`| `MicrosoftTranslator`            |
+
+---
 
 ## Project Structure
 
