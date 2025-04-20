@@ -23,6 +23,27 @@ TRANSLATOR_CLASSES = {
     "microsoft": MicrosoftTranslator,
 }
 
+
+
+def _split_text_by_length(text: str, max_len: int = 1000):
+
+    parts = []
+    while len(text) > max_len:
+        idx = max(
+            text.rfind(delim, 0, max_len)
+            for delim in [". ", "\n", "!", "?", ";"]
+        )
+        if idx <= 0:
+            idx = max_len
+        parts.append(text[:idx].strip())
+        text = text[idx:].strip()
+    if text:
+        parts.append(text.strip())
+    return parts
+
+
+
+
 def _get_translator(target_lang: str):
     svc_name = bot_state.config.get("translation_service", "google").lower()
     cls = TRANSLATOR_CLASSES.get(svc_name, GoogleTranslator)
@@ -37,6 +58,16 @@ def _get_translator(target_lang: str):
         return GoogleTranslator(source="auto", target=target_lang)
 
 
+
+def _safe_translate(translator, text: str) -> str:
+    try:
+        return translator.translate(text)
+    except Exception as e:
+        print(f"⚠️ Partial translation failed: {e}")
+        return text
+
+
+
 def _translate_prompt(prompt: str, target_lang: str = "en") -> str:
     # Find <|im_start|>…<|im_end|> blocks
     
@@ -46,20 +77,25 @@ def _translate_prompt(prompt: str, target_lang: str = "en") -> str:
 
     if not blocks:
         try:
-            return translator.translate(prompt.strip())
+            parts = _split_text_by_length(prompt.strip(), max_len=1000)
+            translated_parts = [_safe_translate(translator, part) for part in parts]
+            return "\n".join(translated_parts)
         except Exception as e:
-            print(f"⚠️ Translation failed ({translator.__class__.__name__}): {e}")
+            print(f"⚠️ Translation failed: {e}")
             return prompt
 
     translated_blocks = []
     for start_tag, content, end_tag in blocks:
         try:
-            tr = translator.translate(content.strip())
-        except Exception as e:
-            print(f"⚠️ Translation failed ({translator.__class__.__name__}): {e}")
-            tr = content
+            parts = _split_text_by_length(content.strip(), max_len=1000)
+            translated_parts = [_safe_translate(translator, part) for part in parts]
+            translated_text = "\n".join(translated_parts)            
 
-        translated_blocks.append(f"{start_tag}{tr}\n{end_tag}")
+        except Exception as e:
+            print(f"⚠️ Block translation failed: {e}")
+            translated_text = content
+
+        translated_blocks.append(f"{start_tag}{translated_text}\n{end_tag}")
 
     return "\n".join(translated_blocks)
 

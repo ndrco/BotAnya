@@ -137,11 +137,7 @@ In your **config.json**, set:
 "translation_service": "google"
 ```
 
-### 2. Storing API keys
-
-Each translation service expects different key names. In `secrets/credentials.json`
-
-### 3. Supported engines
+### 2. Supported engines
 
 | Key        | deep_translator class           |
 |------------|----------------------------------|
@@ -150,6 +146,10 @@ Each translation service expects different key names. In `secrets/credentials.js
 | `mymemory` | `MyMemoryTranslator`             |
 | `yandex`   | `YandexTranslator`               |
 | `microsoft`| `MicrosoftTranslator`            |
+
+### 3. Storing API keys
+
+Some translation service expects different API key names in `secrets/credentials.json`.
 
 ---
 

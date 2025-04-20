@@ -291,13 +291,6 @@ def load_characters(scenario_path: str):
 
             world = data.get("world", {"name": "Неизвестный мир", "description": ""})
             characters = data.get("characters", {})
-
-            if bot_state.debug_mode:
-                print(f"🌍 Мир: {world['name']} — {world['description']}")
-                print("🎭 Персонажи:")
-                for key, char in characters.items():
-                    print(f"  🧬 [{key}] {char['name']} {char.get('emoji', '')} — {char['description']}")
-
             return characters, world
 
     raise FileNotFoundError(f"Файл {scenario_path} не найден!")
