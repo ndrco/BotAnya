@@ -36,3 +36,6 @@ GIGACHAT_SEMAPHORE = 1
 
 # encoding for tokens count
 TIKTOKEN_ENCODING = "gpt2"
+
+# Maximum text fragment size for translator
+MAX_PART_SIZE = 4000

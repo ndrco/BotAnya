@@ -14,6 +14,7 @@ from deep_translator import (
     MicrosoftTranslator
 )
 from bot_state import bot_state
+from config import MAX_PART_SIZE
 
 TRANSLATOR_CLASSES = {
     "google": GoogleTranslator,
@@ -25,7 +26,7 @@ TRANSLATOR_CLASSES = {
 
 
 
-def _split_text_by_length(text: str, max_len: int = 1000):
+def _split_text_by_length(text: str, max_len: int = MAX_PART_SIZE):
 
     parts = []
     while len(text) > max_len:
