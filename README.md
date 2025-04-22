@@ -164,6 +164,7 @@ secrets/credentials.json— OAuth/API credentials for services
 utils.py                — Utility modules (Markdown escape, prompt builders)
 config.py               — Path and constant definitions
 bot_state.py            — State management and persistence
+openai_client.py        — OpenAI integration
 gigachat_client.py      — Sber GigaChat integration
 ollama_client.py        — Ollama integration
 telegram_handlers.py    — Command and message handlers
