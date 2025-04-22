@@ -9,6 +9,7 @@ import json
 import uuid
 import httpx
 import asyncio
+
 from config import GIGACHAT_SEMAPHORE
 
 gigachat_semaphore = asyncio.Semaphore(GIGACHAT_SEMAPHORE)

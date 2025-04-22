@@ -78,7 +78,7 @@ def _translate_prompt(prompt: str, target_lang: str = "en") -> str:
 
     if not blocks:
         try:
-            parts = _split_text_by_length(prompt.strip(), max_len=1000)
+            parts = _split_text_by_length(prompt.strip(), max_len=MAX_PART_SIZE)
             translated_parts = [_safe_translate(translator, part) for part in parts]
             return "\n".join(translated_parts)
         except Exception as e:
@@ -88,7 +88,7 @@ def _translate_prompt(prompt: str, target_lang: str = "en") -> str:
     translated_blocks = []
     for start_tag, content, end_tag in blocks:
         try:
-            parts = _split_text_by_length(content.strip(), max_len=1000)
+            parts = _split_text_by_length(content.strip(), max_len=MAX_PART_SIZE)
             translated_parts = [_safe_translate(translator, part) for part in parts]
             translated_text = "\n".join(translated_parts)            
 

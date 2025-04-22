@@ -34,6 +34,12 @@ OLLAMA_SEMAPHORE = 5
 # max number of concurrent requests to GigaChat API
 GIGACHAT_SEMAPHORE = 1
 
+#OpenAI parametrs
+# max number of concurrent requests to OpenAI API
+OPENAI_SEMAPHORE = 10
+
+
+
 # encoding for tokens count
 TIKTOKEN_ENCODING = "gpt2"
 

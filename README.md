@@ -2,13 +2,13 @@
 
 # BotAnya — Telegram Role-Playing Bot
 
-BotAnya is a Telegram bot for immersive role-playing with support for multiple worlds, characters, scene generation, and translation. It uses local models via Ollama and remote API through GigaChat. It supports ChatML, custom JSON scenarios, history management, and logging.
+BotAnya is a Telegram bot for immersive role-playing with support for multiple worlds, characters, scene generation, and translation. It uses local models via Ollama and remote API through OpenAI and GigaChat. It supports ChatML, custom JSON scenarios, history management, and logging.
 
 ## Features
 
 - Multiple worlds and roles via JSON scenarios.
 - Multi-character mode with dynamic character selection.
-- Support for models through Ollama and GigaChat.
+- Support for models through Ollama, OpenAI and GigaChat.
 - ChatML and plain-text message formats.
 - Commands for retry, edit, continue, and history control.
 - Automatic translation (RU ↔ EN).
@@ -26,10 +26,7 @@ BotAnya is a Telegram bot for immersive role-playing with support for multiple w
    ```bash
    ollama pull llama3.2
    ```
-3. Create configuration files based on the provided examples:
-   - `config.json` in the project root.
-   - `secrets/credentials.json` from `credentials_example.json`.
-4. Prepare directories:
+3. Prepare directories:
    ```plaintext
    /scenarios/           — JSON scenario files (*.json)
    /secrets/             — contains credentials.json
@@ -37,7 +34,12 @@ BotAnya is a Telegram bot for immersive role-playing with support for multiple w
    /user_roles.json      — auto-generated user roles and settings
    /chat_logs/           — JSONL logs of interactions
    ```
-5. Run the bot:
+4. Create configuration file based on the provided examples:
+   - `config.json` in the project root.
+   - `secrets/credentials.json` from `credentials_example.json`.
+5. Store API Key:
+In your `secrets/credentials.json`, add your Telegram and API keys.
+6. Run the bot:
    ```bash
    python BotAnya.py
    ```

@@ -23,6 +23,8 @@ from utils import safe_markdown_v2, smart_trim_history, build_chatml_prompt, \
                         build_system_prompt
 from ollama_client import send_prompt_to_ollama
 from gigachat_client import send_prompt_to_gigachat
+from openai_client import send_prompt_to_openai
+
 from config import (SCENARIOS_DIR, MAX_LENGTH)
 
 
@@ -168,6 +170,9 @@ async def _generate_and_send(
             send_func = send_prompt_to_ollama
         case "gigachat":
             send_func = send_prompt_to_gigachat
+        case "openai":
+            send_func = send_prompt_to_openai
+
         case other:
             await update.effective_message.reply_text(f"❌ Неизвестный тип сервиса: {other}")
             return
